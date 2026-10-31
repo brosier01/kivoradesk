@@ -1,0 +1,27 @@
+#!/sbin/openrc-run
+# Virtual X11 display shared by the agent and the human viewer.
+
+description="KivoraDesk virtual display (Xvfb)"
+
+. /etc/conf.d/kivoradesk
+
+supervisor=supervise-daemon
+command=/usr/bin/Xvfb
+command_args="$KIVORA_DISPLAY -screen 0 $KIVORA_SCREEN -nolisten tcp"
+command_user="$KIVORA_USER:$KIVORA_USER"
+respawn_delay=2
+
+depend() {
+	need localmount
+	after bootmisc
+}
+
+start_post() {
+	# Wait for the display to accept clients before dependents start.
+	local i=0
+	while ! su -s /bin/sh "$KIVORA_USER" -c "DISPLAY=$KIVORA_DISPLAY xprop -root >/dev/null 2>&1"; do
+		i=$((i + 1))
+		[ $i -ge 50 ] && { eerror "display $KIVORA_DISPLAY did not come up"; return 1; }
+		sleep 0.1
+	done
+}

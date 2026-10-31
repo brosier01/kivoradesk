@@ -1,0 +1,17 @@
+#!/sbin/openrc-run
+# Window manager for the KivoraDesk display.
+
+description="KivoraDesk window manager (Openbox)"
+
+. /etc/conf.d/kivoradesk
+
+supervisor=supervise-daemon
+command=/usr/bin/openbox
+command_user="$KIVORA_USER:$KIVORA_USER"
+directory="/home/$KIVORA_USER"
+supervise_daemon_args="--env DISPLAY=$KIVORA_DISPLAY --env HOME=/home/$KIVORA_USER"
+respawn_delay=2
+
+depend() {
+	need kivora-display
+}
