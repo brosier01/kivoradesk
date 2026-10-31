@@ -43,7 +43,13 @@ done
 df -P /workspace / | awk 'NR > 1 { pct = $5 + 0; msg = sprintf("disk %s %d%% used, %d MiB free", $6, pct, $4 / 1024);
 	print (pct >= 90 ? "warn " : "ok ") msg }'
 free -m | awk '/^Mem:/ { print "ok memory " $3 " MiB used, " $7 " MiB available" }'
-wget -qO- http://127.0.0.1:9222/json/version 2>/dev/null | grep -q Browser && echo "ok browser DevTools answer" || echo "fail browser DevTools do not answer"
+# Chromium may still be starting right after a deployment.
+browser=fail
+for i in $(seq 20); do
+	wget -qO- http://127.0.0.1:9222/json/version 2>/dev/null | grep -q Browser && browser=ok && break
+	sleep 1
+done
+[ $browser = ok ] && echo "ok browser DevTools answer" || echo "fail browser DevTools do not answer after 20 s"
 code=$(wget -S -qO- http://127.0.0.1:6080/ 2>&1 | awk '/HTTP\// { print $2; exit }')
 [ "$code" = 401 ] && echo "ok web gateway answers (sign-in required)" || echo "fail web gateway answers ${code:-nothing}"
 [ -S /run/kivora/control.sock ] && echo "ok control socket present" || echo "fail control socket missing"
