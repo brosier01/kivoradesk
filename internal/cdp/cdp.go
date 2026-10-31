@@ -164,12 +164,14 @@ type Page struct {
 	SessionID string
 }
 
-// NewPage opens a new tab at url and attaches to it.
+// NewPage opens a new tab, attaches to it, then navigates to url. Creating
+// the tab directly at url races with the attach: the session can end up bound
+// to the initial about:blank document.
 func (c *Conn) NewPage(ctx context.Context, url string) (*Page, error) {
 	var created struct {
 		TargetID string `json:"targetId"`
 	}
-	if err := c.Call(ctx, "", "Target.createTarget", map[string]any{"url": url}, &created); err != nil {
+	if err := c.Call(ctx, "", "Target.createTarget", map[string]any{"url": "about:blank"}, &created); err != nil {
 		return nil, err
 	}
 	var attached struct {
@@ -178,7 +180,29 @@ func (c *Conn) NewPage(ctx context.Context, url string) (*Page, error) {
 	if err := c.Call(ctx, "", "Target.attachToTarget", map[string]any{"targetId": created.TargetID, "flatten": true}, &attached); err != nil {
 		return nil, err
 	}
-	return &Page{conn: c, TargetID: created.TargetID, SessionID: attached.SessionID}, nil
+	p := &Page{conn: c, TargetID: created.TargetID, SessionID: attached.SessionID}
+	if url != "about:blank" {
+		if err := p.Navigate(ctx, url); err != nil {
+			p.Close(ctx)
+			return nil, err
+		}
+	}
+	return p, nil
+}
+
+// Navigate loads url in the page. It returns once the navigation has been
+// committed, not when the page has finished loading.
+func (p *Page) Navigate(ctx context.Context, url string) error {
+	var res struct {
+		ErrorText string `json:"errorText"`
+	}
+	if err := p.Call(ctx, "Page.navigate", map[string]any{"url": url}, &res); err != nil {
+		return err
+	}
+	if res.ErrorText != "" {
+		return fmt.Errorf("navigate to %s: %s", url, res.ErrorText)
+	}
+	return nil
 }
 
 // Close closes the tab.
