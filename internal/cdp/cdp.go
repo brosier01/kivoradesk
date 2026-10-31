@@ -174,13 +174,10 @@ func (c *Conn) NewPage(ctx context.Context, url string) (*Page, error) {
 	if err := c.Call(ctx, "", "Target.createTarget", map[string]any{"url": "about:blank"}, &created); err != nil {
 		return nil, err
 	}
-	var attached struct {
-		SessionID string `json:"sessionId"`
-	}
-	if err := c.Call(ctx, "", "Target.attachToTarget", map[string]any{"targetId": created.TargetID, "flatten": true}, &attached); err != nil {
+	p, err := c.Attach(ctx, created.TargetID)
+	if err != nil {
 		return nil, err
 	}
-	p := &Page{conn: c, TargetID: created.TargetID, SessionID: attached.SessionID}
 	if url != "about:blank" {
 		if err := p.Navigate(ctx, url); err != nil {
 			p.Close(ctx)
@@ -188,6 +185,17 @@ func (c *Conn) NewPage(ctx context.Context, url string) (*Page, error) {
 		}
 	}
 	return p, nil
+}
+
+// Attach opens a flattened session on an existing target, such as a tab.
+func (c *Conn) Attach(ctx context.Context, targetID string) (*Page, error) {
+	var attached struct {
+		SessionID string `json:"sessionId"`
+	}
+	if err := c.Call(ctx, "", "Target.attachToTarget", map[string]any{"targetId": targetID, "flatten": true}, &attached); err != nil {
+		return nil, err
+	}
+	return &Page{conn: c, TargetID: targetID, SessionID: attached.SessionID}, nil
 }
 
 // Navigate loads url in the page. It returns once the navigation has been
