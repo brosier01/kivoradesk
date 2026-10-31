@@ -3,7 +3,8 @@
 
   The VM may open connections to the Internet, but not to private networks:
   the host, the homelab LAN, VPNs (WireGuard, Tailscale) or other VMs. Only
-  DNS and DHCP on the libvirt gateway are allowed. Connections opened by the
+  DNS and DHCP on the libvirt gateway are allowed, plus the private services
+  listed in the allowlist (scripts/vm/allow.sh). Connections opened by the
   host to the VM (SSH) keep working because only NEW outgoing traffic is
   dropped.
 
@@ -19,6 +20,9 @@
   <rule action='accept' direction='out' priority='100'>
     <udp dstipaddr='@GATEWAY@' dstportstart='67'/>
   </rule>
+
+  <!-- Private services allowed by the human (scripts/vm/allow.sh). -->
+  <!-- @ALLOWLIST@ -->
 
   <rule action='drop' direction='out' priority='500'>
     <all state='NEW' dstipaddr='10.0.0.0' dstipmask='8' comment='private (RFC 1918)'/>

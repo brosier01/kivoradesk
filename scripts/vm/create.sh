@@ -81,15 +81,7 @@ else
 fi
 
 log "defining network filter $NWFILTER"
-gateway=$(virsh_ net-dumpxml "$LIBVIRT_NETWORK" | sed -n "s/.*<ip address='\([0-9.]*\)'.*/\1/p" | head -n1)
-[[ -n $gateway ]] || die "could not read the gateway address of network $LIBVIRT_NETWORK"
-sed "s|@GATEWAY@|$gateway|g" "$REPO_ROOT/host/libvirt/nwfilter-no-lan.xml" >"$work/nwfilter.xml"
-# Redefining an existing filter must keep its UUID.
-uuid=$(virsh_ nwfilter-dumpxml "$NWFILTER" 2>/dev/null | sed -n 's|.*<uuid>\(.*\)</uuid>.*|\1|p')
-if [[ -n $uuid ]]; then
-	sed -i "s|<filter name='$NWFILTER' chain='root'>|&\n  <uuid>$uuid</uuid>|" "$work/nwfilter.xml"
-fi
-virsh_ nwfilter-define "$work/nwfilter.xml" >/dev/null
+define_nwfilter
 
 log "reserving $VM_IP on network $LIBVIRT_NETWORK"
 virsh_ net-update "$LIBVIRT_NETWORK" delete ip-dhcp-host "$(dhcp_host_xml)" --live --config >/dev/null 2>&1 || true

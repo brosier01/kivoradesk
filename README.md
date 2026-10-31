@@ -150,6 +150,7 @@ scripts/vm/destroy.sh --yes --keep-data # rebuild the system, keep /home/agent a
 scripts/vm/destroy.sh --yes             # delete the VM and all its data
 scripts/vm/check-isolation.sh           # VM reaches the Internet, not private networks
 scripts/vm/doctor.sh                    # diagnose the VM, its services and the MCP server
+scripts/vm/allow.sh add 192.168.1.20:8080 staging   # let the VM reach one private service
 ```
 
 Settings (VM name, sizes, fixed IP, Alpine release, libvirt pool) can be
@@ -175,7 +176,9 @@ inside the VM can lift it. New connections to 10.0.0.0/8, 172.16.0.0/12,
 192.168.0.0/16, 169.254.0.0/16 and 100.64.0.0/10 are dropped, except DNS and
 DHCP on the libvirt gateway; the host can still open SSH sessions to the VM.
 `check-isolation.sh` verifies this against the host's own addresses and the
-LAN router.
+LAN router. `allow.sh add|remove|list` manages exceptions (an address,
+optionally a CIDR and a TCP port), kept in `~/.local/share/kivoradesk/allowlist`
+on the host and applied to the running VM at once.
 
 Use `virsh shutdown --mode agent kivoradesk` for a clean shutdown: the Alpine
 virt image has no ACPI power button.
