@@ -53,7 +53,12 @@ func (s *server) registerComputer(srv *mcp.Server) {
 			}
 			var st syscall.Statfs_t
 			if syscall.Statfs("/workspace", &st) == nil {
-				state["workspace_free_bytes"] = st.Bavail * uint64(st.Bsize)
+				free, total := st.Bavail*uint64(st.Bsize), st.Blocks*uint64(st.Bsize)
+				state["workspace_free_bytes"] = free
+				if free < 1<<30 || free*10 < total {
+					state["workspace_warning"] = "Low disk space in /workspace. Tell the human once, listing the largest items " +
+						"(shell_run: du -sh /workspace/* | sort -h | tail), and delete nothing without their confirmation."
+				}
 			}
 			return jsonText(state), nil
 		})
