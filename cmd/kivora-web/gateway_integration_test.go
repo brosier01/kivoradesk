@@ -120,6 +120,12 @@ func rfbConnect(t *testing.T, ctx context.Context, e env) (io.ReadWriter, uint16
 	c.Write([]byte{1}) // shared session
 	init := read(24)
 	read(int(binary.BigEndian.Uint32(init[20:]))) // desktop name
+
+	// Behave like a viewer: x11vnc ignores the first pointer event of a
+	// client that has not asked for the framebuffer yet.
+	c.Write([]byte{3, 0, 0, 0, 0, 0, 5, 0, 3, 32})
+	go io.Copy(io.Discard, c)
+	time.Sleep(300 * time.Millisecond)
 	return c, binary.BigEndian.Uint16(init[0:]), binary.BigEndian.Uint16(init[2:])
 }
 

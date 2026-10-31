@@ -8,9 +8,9 @@ KivoraDesk runs an Alpine Linux VM on your own server (QEMU/KVM + libvirt).
 Claude Code stays on your laptop and drives the VM through an MCP server reached
 over SSH. You can watch the desktop live and take over at any time.
 
-> **Status:** early development. Phases 0 and 1 are done: the VM, its live
-> view and human takeover work from a laptop. The MCP server is not built yet,
-> so an agent cannot drive the desktop yet.
+> **Status:** early development. Phases 0 to 2 are done: Claude Code on a
+> laptop drives the VM through the MCP server (web research, forms, PDFs,
+> shell, files) while the human watches and can take over.
 
 ## How it works
 
@@ -18,7 +18,7 @@ over SSH. You can watch the desktop live and take over at any time.
 Laptop                              Homelab server (Linux, KVM)
 ┌──────────────────────┐            ┌──────────────────────────────────────┐
 │ Claude Code          │── SSH ────▶│ VM "kivoradesk" (Alpine Linux)       │
-│  └ MCP client (stdio)│            │  ├ MCP server (planned)              │
+│  └ MCP client (stdio)│            │  ├ MCP server (kivora-mcp)           │
 │ Browser: live view   │── private ▶│  ├ Xvfb + Openbox, 1280x800          │
 └──────────────────────┘   network  │  ├ Chromium, persistent profile      │
                                     │  ├ /workspace (durable files)        │
@@ -35,19 +35,45 @@ Laptop                              Homelab server (Linux, KVM)
 - **State survives.** Files, browser sessions and settings persist across
   reboots. Closing the laptop stops the agent, not the VM.
 
-## Planned MCP tools
+## MCP tools
 
-| Family | Purpose |
+| Family | Tools |
 |---|---|
-| `computer.*` | Screenshots, mouse, keyboard, windows, on the real desktop coordinates |
-| `browser.*` | Structured browsing over CDP: navigate, tabs, read page text, fill forms, download |
-| `shell.*` | Run commands in the VM as the unprivileged `agent` user |
-| `files.*` | Read and write `/workspace`, transfer files to and from the laptop |
-| `human.*` | Hand control to the human for SSO, passkeys, CAPTCHAs or 2FA, then resume |
-| `secrets.*` | Fill credentials by reference, without exposing values to the model |
+| Desktop | `computer_screenshot`, `computer_click`, `computer_move`, `computer_drag`, `computer_scroll`, `computer_type`, `computer_key`, `computer_windows`, `computer_focus_window`, `computer_get_state` |
+| Browser (CDP, visible tab) | `browser_navigate`, `browser_read_page`, `browser_click`, `browser_type`, `browser_wait_for`, `browser_back`, `browser_forward`, `browser_reload`, `browser_tabs`, `browser_new_tab`, `browser_switch_tab`, `browser_close_tab`, `browser_save_pdf`, `browser_download` |
+| Shell | `shell_run` |
+| Files (`/workspace`) | `files_list`, `files_read`, `files_write`, `files_delete` |
+| Human | `human_request_takeover`, `human_wait_for_control` |
 
-Web content returned to the model is marked as untrusted, and tools declare MCP
-annotations (read-only, destructive) so the client can ask for approval.
+- **Input lock.** Acting tools run only while the agent owns the desktop, one
+  at a time, and report when control moved during the action. Observing tools
+  are refused while the human uses the desktop. Only the human gives control
+  back; the agent can ask for help, which pauses it and shows the reason in the
+  live view.
+- **Privilege separation.** The MCP server runs as `agent`, which owns the
+  display and the browser. `shell_run` and `files_*` run as `worker`, which has
+  no access to the display, Chromium DevTools, VNC, the gateway or the control
+  API (local firewall by UID, `doas` limited to the helper). Code the agent
+  runs cannot drive the desktop behind the lock.
+- **Untrusted content.** Page text, file content and command output are wrapped
+  as untrusted data. Tools declare MCP annotations (read-only, destructive).
+- **Typing.** `browser_type` inserts any text exactly through CDP.
+  `computer_type` types ASCII with the keyboard and pastes other characters
+  through the clipboard, checking control between chunks.
+- **Audit.** Every call is logged as a JSON line with a trace ID in
+  `/home/agent/.local/state/kivora/audit.log`.
+- **Files to the laptop.** Copy them with `scp kivoradesk:/workspace/<path> .`
+
+## Use with Claude Code
+
+On the laptop, with the SSH configuration from `scripts/vm/ssh-config.sh`:
+
+```sh
+claude mcp add --scope user kivoradesk -- ssh -o ClearAllForwardings=yes -T kivoradesk /usr/local/bin/kivora-mcp
+```
+
+Then ask Claude Code, for example, to research a topic on the web and save the
+sources as PDFs in `/workspace`, while you watch it in the live view.
 
 ## Phase 0 results
 
@@ -62,8 +88,9 @@ over CDP checks the event type, button and exact screen coordinates.
 | ASCII typing, Ctrl+A / Backspace | 100 / 25 | 100 % |
 | Non-ASCII typing via xdotool (é, €, œ) | 100 | ~10 % |
 
-Non-ASCII typing will be implemented natively in the MCP server (XTest with
-keymap synchronisation, CDP `Input.insertText` in the browser).
+The MCP server avoids that limit: `computer_type` pastes non-ASCII text
+through the clipboard (100/100 exact in the end-to-end test) and
+`browser_type` inserts text through CDP.
 
 Resources: about 313 MiB RAM used at idle, 490 MiB with three real sites open,
 1 GiB of disk. A new VM is created and provisioned in under a minute.
@@ -74,17 +101,22 @@ Resources: about 313 MiB RAM used at idle, 490 MiB with three real sites open,
 |---|---|---|
 | 0 | Feasibility: KVM, Alpine, Chromium, CDP, native input | Done |
 | 1 | Live view from the laptop, human takeover, SSH access path, data disk, network isolation | Done |
-| 2 | MCP server: `computer`, `browser`, `shell`, `files`, `human`; agent/human lock | Next |
-| 3 | Robustness: separate data disk, update/recover/reset, encrypted backups, audit log, secrets, mobile view | Planned |
+| 2 | MCP server: `computer`, `browser`, `shell`, `files`, `human`; agent/human lock; worker account | Done |
+| 3 | Robustness: update/recover/reset, encrypted backups, audit retention, secrets, mobile view | Next |
 | 4 | Optimisation and published benchmarks | Planned |
 | 5 | Installation guide and first release | Planned |
 
 ## Repository layout
 
 ```text
+cmd/kivora-mcp/     MCP server (and the worker helper it runs as worker)
 cmd/kivora-probe/   input accuracy probe, runs inside the VM
 cmd/kivora-web/     web gateway: live view, takeover, input control state
-internal/control/   input owner state (agent, paused, human)
+internal/browser/   structured browser tools over CDP
+internal/control/   input owner state (agent, paused, human) and agent API
+internal/desktop/   native mouse, keyboard, screenshots and windows
+internal/worker/    shell commands and file operations as the worker
+internal/workspace/ symlink-safe writes into /workspace
 internal/rfb/       VNC client-message filter used by the gateway
 internal/cdp/       minimal Chrome DevTools Protocol client
 image/cloud-init/   first-boot configuration (admin user, SSH key)
@@ -162,14 +194,26 @@ open "http://localhost:6080/?token=…"   # the URL from web-url.sh, once
 The token is stored in a strict same-site cookie. The gateway also rejects
 non-loopback `Host` headers and cross-origin control requests.
 
-Gateway integration tests run through the tunnel:
+## Tests
+
+Unit tests run anywhere: `go test ./...`.
+
+Integration tests run against the VM, with the gateway tunnel open
+(`ssh -N -L 6080:127.0.0.1:6080 agent@192.168.122.50` from the server, using
+a key authorized with `authorize-key.sh`):
 
 ```sh
+KEY=~/.local/share/kivoradesk/ssh/id_ed25519
 KIVORA_WEB_URL=http://localhost:6080 \
 KIVORA_WEB_TOKEN=$(scripts/vm/ssh.sh 'doas cat /var/lib/kivora-web/token') \
 KIVORA_XDOTOOL="$PWD/scripts/vm/ssh.sh doas -u agent env DISPLAY=:1 xdotool" \
-go test -tags integration ./cmd/kivora-web
+KIVORA_MCP_COMMAND="ssh -i $KEY -T agent@192.168.122.50 /usr/local/bin/kivora-mcp" \
+go test -tags integration -p 1 ./cmd/...   # one at a time: they share the VM
 ```
+
+The MCP tests drive the real server over SSH: browsing, forms, accented
+typing, PDF and download, shell and files, the input lock and the takeover
+request. `KIVORA_TYPE_RUNS=100` sets the number of accented typing runs.
 
 ### Input accuracy probe
 

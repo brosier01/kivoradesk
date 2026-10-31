@@ -7,11 +7,20 @@ description="KivoraDesk web gateway"
 
 supervisor=supervise-daemon
 command=/usr/local/bin/kivora-web
-command_args="-listen 127.0.0.1:$KIVORA_WEB_PORT -vnc 127.0.0.1:$KIVORA_VNC_PORT -state-dir /var/lib/kivora-web"
-command_user="kivora-web"
+command_args="-listen 127.0.0.1:$KIVORA_WEB_PORT -vnc 127.0.0.1:$KIVORA_VNC_PORT -state-dir /var/lib/kivora-web -control-socket /run/kivora/control.sock"
+# The control socket is group-accessible: only members of kivora-ctl (the
+# desktop account, not the worker) can read or request control.
+command_user="kivora-web:kivora-ctl"
 respawn_delay=2
+output_log=/var/log/kivora-web.log
+error_log=/var/log/kivora-web.log
 
 depend() {
 	need net
 	after kivora-vnc
+}
+
+start_pre() {
+	checkpath -d -o kivora-web:kivora-ctl -m 0750 /run/kivora
+	checkpath -f -o kivora-web:kivora-ctl -m 0640 /var/log/kivora-web.log
 }

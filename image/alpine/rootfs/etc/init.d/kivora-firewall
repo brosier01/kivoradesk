@@ -1,0 +1,22 @@
+#!/sbin/openrc-run
+# Local firewall rules of KivoraDesk (only our own table; the rest of the
+# ruleset is left alone).
+
+description="KivoraDesk local firewall"
+
+depend() {
+	need localmount
+	before net kivora-display kivora-web
+}
+
+start() {
+	ebegin "Loading KivoraDesk firewall rules"
+	nft -f /etc/kivoradesk/firewall.nft
+	eend $?
+}
+
+stop() {
+	ebegin "Removing KivoraDesk firewall rules"
+	nft delete table inet kivoradesk 2>/dev/null
+	eend 0
+}

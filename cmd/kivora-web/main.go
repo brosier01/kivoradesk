@@ -51,16 +51,17 @@ func main() {
 	vncAddr := flag.String("vnc", "127.0.0.1:5900", "VNC server address")
 	novnc := flag.String("novnc", "/usr/share/novnc", "directory holding the noVNC client")
 	stateDir := flag.String("state-dir", "/var/lib/kivora-web", "directory for the session token")
+	controlSocket := flag.String("control-socket", "/run/kivora/control.sock", "Unix socket serving the agent's control API")
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	if err := run(*listen, *vncAddr, *novnc, *stateDir, log); err != nil {
+	if err := run(*listen, *vncAddr, *novnc, *stateDir, *controlSocket, log); err != nil {
 		log.Error("fatal", "err", err)
 		os.Exit(1)
 	}
 }
 
-func run(listen, vncAddr, novnc, stateDir string, log *slog.Logger) error {
+func run(listen, vncAddr, novnc, stateDir, controlSocket string, log *slog.Logger) error {
 	token, err := loadToken(filepath.Join(stateDir, "token"))
 	if err != nil {
 		return err
@@ -84,16 +85,30 @@ func run(listen, vncAddr, novnc, stateDir string, log *slog.Logger) error {
 		Handler:           s.checkHost(mux),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
+	// The agent's control API: group-accessible socket, so only accounts in
+	// the gateway's group (the desktop user) can reach it.
+	os.Remove(controlSocket)
+	ln, err := net.Listen("unix", controlSocket)
+	if err != nil {
+		return fmt.Errorf("control socket: %w", err)
+	}
+	if err := os.Chmod(controlSocket, 0o660); err != nil {
+		return err
+	}
+	agentSrv := &http.Server{Handler: control.AgentHandler(s.state), ReadHeaderTimeout: 10 * time.Second}
+	go agentSrv.Serve(ln)
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go func() {
 		<-ctx.Done()
 		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
+		agentSrv.Close() // waiters hold long requests; do not wait for them
 		srv.Shutdown(shutdown)
 	}()
 
-	log.Info("listening", "addr", listen, "vnc", vncAddr)
+	log.Info("listening", "addr", listen, "vnc", vncAddr, "control", controlSocket)
 	if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
