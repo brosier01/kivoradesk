@@ -65,6 +65,19 @@ xorriso -as mkisofs -quiet -output "$work/seed.iso" -volid cidata -joliet -rock 
 	"$work/user-data" "$work/meta-data"
 upload_volume "$VM_NAME-seed.iso" raw "$work/seed.iso"
 
+# The data disk holds /home/agent and /workspace. It survives a rebuild of
+# the system disk (scripts/vm/destroy.sh --keep-data).
+if virsh_ vol-info --pool "$LIBVIRT_POOL" "$VM_NAME-data.qcow2" >/dev/null 2>&1; then
+	log "reusing existing data disk"
+else
+	log "creating ${VM_DATA_GB}G data disk"
+	virsh_ vol-create-as "$LIBVIRT_POOL" "$VM_NAME-data.qcow2" "${VM_DATA_GB}G" --format qcow2 >/dev/null
+fi
+
+log "reserving $VM_IP on network $LIBVIRT_NETWORK"
+virsh_ net-update "$LIBVIRT_NETWORK" delete ip-dhcp-host "$(dhcp_host_xml)" --live --config >/dev/null 2>&1 || true
+virsh_ net-update "$LIBVIRT_NETWORK" add-last ip-dhcp-host "$(dhcp_host_xml)" --live --config >/dev/null
+
 log "creating VM $VM_NAME (${VM_VCPUS} vCPU, ${VM_MEMORY_MB} MiB)"
 virt-install --connect "$LIBVIRT_URI" \
 	--name "$VM_NAME" \
@@ -73,8 +86,9 @@ virt-install --connect "$LIBVIRT_URI" \
 	--osinfo linux2022 \
 	--import \
 	--disk "vol=$LIBVIRT_POOL/$VM_NAME.qcow2,bus=virtio" \
+	--disk "vol=$LIBVIRT_POOL/$VM_NAME-data.qcow2,bus=virtio,serial=kivora-data" \
 	--disk "vol=$LIBVIRT_POOL/$VM_NAME-seed.iso,device=cdrom" \
-	--network "network=$LIBVIRT_NETWORK,model=virtio" \
+	--network "network=$LIBVIRT_NETWORK,model=virtio,mac=$VM_MAC" \
 	--channel unix,target.type=virtio,target.name=org.qemu.guest_agent.0 \
 	--graphics none \
 	--console pty,target_type=serial \
