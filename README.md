@@ -61,7 +61,11 @@ Laptop                              Homelab server (Linux, KVM)
   `computer_type` types ASCII with the keyboard and pastes other characters
   through the clipboard, checking control between chunks.
 - **Audit.** Every call is logged as a JSON line with a trace ID in
-  `/home/agent/.local/state/kivora/audit.log`.
+  `/home/agent/.local/state/kivora/audit/audit-YYYY-MM-DD.jsonl`, kept 90 days.
+  Passwords, tokens and keys are masked in the logged arguments.
+- **Timeouts and recovery.** Every call has a maximum duration. After a
+  Chromium crash, browser tools wait for the service to restart it; without
+  Internet they fail at once with the browser's network error.
 - **Files to the laptop.** Copy them with `scp kivoradesk:/workspace/<path> .`
 
 ## Use with Claude Code
@@ -138,6 +142,7 @@ scripts/vm/ssh.sh                       # open a shell as the admin user
 scripts/vm/destroy.sh --yes --keep-data # rebuild the system, keep /home/agent and /workspace
 scripts/vm/destroy.sh --yes             # delete the VM and all its data
 scripts/vm/check-isolation.sh           # VM reaches the Internet, not private networks
+scripts/vm/doctor.sh                    # diagnose the VM, its services and the MCP server
 ```
 
 Settings (VM name, sizes, fixed IP, Alpine release, libvirt pool) can be
@@ -214,6 +219,8 @@ go test -tags integration -p 1 ./cmd/...   # one at a time: they share the VM
 The MCP tests drive the real server over SSH: browsing, forms, accented
 typing, PDF and download, shell and files, the input lock and the takeover
 request. `KIVORA_TYPE_RUNS=100` sets the number of accented typing runs.
+`KIVORA_FAULTS=1` adds fault injection: Chromium is killed and the VM loses
+its Internet route, and the tools must recover or fail explicitly.
 
 ### Input accuracy probe
 
