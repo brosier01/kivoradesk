@@ -43,6 +43,7 @@ Laptop                              Homelab server (Linux, KVM)
 | Browser (CDP, visible tab) | `browser_navigate`, `browser_read_page`, `browser_click`, `browser_type`, `browser_wait_for`, `browser_back`, `browser_forward`, `browser_reload`, `browser_tabs`, `browser_new_tab`, `browser_switch_tab`, `browser_close_tab`, `browser_save_pdf`, `browser_download` |
 | Shell | `shell_run` |
 | Files (`/workspace`) | `files_list`, `files_read`, `files_write`, `files_delete` |
+| Credentials | `secrets_list`, `secrets_fill` |
 | Human | `human_request_takeover`, `human_wait_for_control` |
 
 - **Input lock.** Acting tools run only while the agent owns the desktop, one
@@ -66,6 +67,12 @@ Laptop                              Homelab server (Linux, KVM)
 - **Timeouts and recovery.** Every call has a maximum duration. After a
   Chromium crash, browser tools wait for the service to restart it; without
   Internet they fail at once with the browser's network error.
+- **Credentials.** The human stores credentials with `scripts/vm/secret.sh`,
+  each bound to the sites where it may be used. The agent sees names and sites
+  only; `secrets_fill` checks the page origin and fills the field in one step,
+  and masks it on screen. Password fields and filled fields are never returned
+  by `browser_read_page`. Once logged in, the agent can still read what the
+  site itself displays.
 - **Files to the laptop.** Copy them with `scp kivoradesk:/workspace/<path> .`
 
 ## Use with Claude Code
@@ -195,6 +202,17 @@ background. They are encrypted with GPG (AES-256) using the passphrase in
 (`KIVORA_BACKUP_KEEP`). **Keep a copy of the passphrase file elsewhere**:
 without it, backups cannot be restored.
 
+## Credentials
+
+```sh
+scripts/vm/secret.sh set github-password https://github.com   # prompts for the value
+scripts/vm/secret.sh list                                     # names and sites
+scripts/vm/secret.sh delete github-password
+```
+
+Values are stored in the VM, readable only by the desktop account, and
+included in the encrypted backups of the data disk.
+
 ## Live view from the laptop
 
 The web gateway (`kivora-web`) streams the desktop with noVNC and decides who
@@ -241,8 +259,10 @@ go test -tags integration -p 1 ./cmd/...   # one at a time: they share the VM
 The MCP tests drive the real server over SSH: browsing, forms, accented
 typing, PDF and download, shell and files, the input lock and the takeover
 request. `KIVORA_TYPE_RUNS=100` sets the number of accented typing runs.
-`KIVORA_FAULTS=1` adds fault injection: Chromium is killed and the VM loses
-its Internet route, and the tools must recover or fail explicitly.
+`KIVORA_HOST_SCRIPTS=1` adds the tests that use the server's admin scripts:
+fault injection (Chromium is killed, the VM loses its Internet route, and the
+tools must recover or fail explicitly) and a credential that must never
+reach the model.
 
 ### Input accuracy probe
 

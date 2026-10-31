@@ -382,7 +382,11 @@ const readPageJS = `(() => {
     if (!visible(el)) continue;
     const id = elements.length + 1;
     el.setAttribute("data-kivora-id", id);
-    const label = (el.getAttribute("aria-label") || el.innerText || el.value || el.placeholder ||
+    // Never return what is typed in a password field or a field filled
+    // from the secrets store.
+    const hidden = el.type === "password" || el.hasAttribute("data-kivora-secret");
+    const value = hidden ? "" : el.value;
+    const label = (el.getAttribute("aria-label") || el.innerText || value || el.placeholder ||
       el.title || el.alt || el.name || "").replace(/\s+/g, " ").trim().slice(0, 120);
     elements.push({id, tag: el.tagName.toLowerCase(), type: el.getAttribute("type") || el.getAttribute("role") || "",
       label, href: el.href && typeof el.href === "string" ? el.href : ""});
@@ -484,6 +488,71 @@ func (b *Browser) Type(ctx context.Context, id int, text string, clear, submit b
 			time.Sleep(300 * time.Millisecond)
 			return waitLoaded(ctx, p)
 		}
+		return nil
+	})
+	if err != nil {
+		return Tab{}, err
+	}
+	return b.Current(ctx)
+}
+
+const secretTargetJS = `(() => {
+  const el = document.querySelector('[data-kivora-id="%d"]');
+  if (!el) return {ok: false, why: "element not found; call browser_read_page again"};
+  const fillable = (el.tagName === "INPUT" && !["checkbox", "radio", "submit", "button", "file", "hidden"].includes(el.type)) ||
+    el.tagName === "TEXTAREA";
+  if (!fillable) return {ok: false, why: "element is not a text field"};
+  return {ok: true, url: location.href};
+})()`
+
+// secretFillJS checks the origin and fills the field in one script, so that
+// no navigation can happen in between. It uses the native value setter and
+// input events, which frameworks such as React listen to.
+const secretFillJS = `((origin, id, value) => {
+  if (location.origin !== origin) return false;
+  const el = document.querySelector('[data-kivora-id="' + id + '"]');
+  if (!el) return false;
+  el.scrollIntoView({block: "center"});
+  el.focus();
+  el.setAttribute("data-kivora-secret", "");
+  if (el.type !== "password") el.style.webkitTextSecurity = "disc"; // mask on screen too
+  const proto = el.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+  Object.getOwnPropertyDescriptor(proto, "value").set.call(el, value);
+  el.dispatchEvent(new Event("input", {bubbles: true}));
+  el.dispatchEvent(new Event("change", {bubbles: true}));
+  return true;
+})(%s, %d, %s)`
+
+// FillSecret puts a secret into a field numbered by ReadPage, replacing its
+// content. valueFor receives the page URL and returns the value if the
+// secret may be used there, together with the allowed origin; the fill is
+// refused if the page is no longer on that origin when it happens. The
+// value never comes back from the page: ReadPage hides filled fields.
+func (b *Browser) FillSecret(ctx context.Context, id int, valueFor func(pageURL string) (value, origin string, err error)) (Tab, error) {
+	err := b.withActive(ctx, func(_ *cdp.Conn, p *cdp.Page) error {
+		var res struct {
+			OK  bool   `json:"ok"`
+			Why string `json:"why"`
+			URL string `json:"url"`
+		}
+		if err := p.Eval(ctx, fmt.Sprintf(secretTargetJS, id), &res); err != nil {
+			return err
+		}
+		if !res.OK {
+			return fmt.Errorf("element %d: %s", id, res.Why)
+		}
+		value, origin, err := valueFor(res.URL)
+		if err != nil {
+			return err
+		}
+		var filled bool
+		if err := p.Eval(ctx, fmt.Sprintf(secretFillJS, jsString(origin), id, jsString(value)), &filled); err != nil {
+			return errors.New("could not fill the field") // never echo the script: it holds the value
+		}
+		if !filled {
+			return errors.New("the page changed before the field could be filled; read it again")
+		}
+		time.Sleep(200 * time.Millisecond) // let the masked field paint before a screenshot
 		return nil
 	})
 	if err != nil {
