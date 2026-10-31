@@ -19,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/brosier01/kivoradesk/internal/browser"
 	"github.com/brosier01/kivoradesk/internal/control"
@@ -53,6 +54,7 @@ func main() {
 	cdpURL := flag.String("cdp", "http://127.0.0.1:9222", "Chromium DevTools endpoint")
 	controlSocket := flag.String("control-socket", "/run/kivora/control.sock", "control API socket of the web gateway")
 	workerCmd := flag.String("worker", "doas -u worker /usr/local/bin/kivora-mcp worker", "command running the worker helper")
+	auditDays := flag.Int("audit-days", 90, "days of audit log to keep")
 	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
 	if *showVersion {
@@ -65,7 +67,7 @@ func main() {
 		log.Fatal(err)
 	}
 	state := filepath.Join(home, ".local", "state", "kivora")
-	audit, err := openAudit(filepath.Join(state, "audit.log"))
+	audit, err := openAudit(filepath.Join(state, "audit"), time.Duration(*auditDays)*24*time.Hour)
 	if err != nil {
 		log.Fatal(err)
 	}
