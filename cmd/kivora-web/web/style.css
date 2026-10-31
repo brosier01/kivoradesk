@@ -28,3 +28,4 @@ button {
 }
 button:disabled { opacity: .45; cursor: default; }
 main { flex: 1; min-height: 0; }
+.request { padding: 8px 12px; background: var(--paused); color: #111; font-weight: 600; }

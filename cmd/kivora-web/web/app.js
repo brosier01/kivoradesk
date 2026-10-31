@@ -4,6 +4,7 @@ import RFB from "/novnc/core/rfb.js";
 
 const ownerEl = document.getElementById("owner");
 const linkEl = document.getElementById("link");
+const requestEl = document.getElementById("request");
 const buttons = {
   human: document.getElementById("take"),
   paused: document.getElementById("pause"),
@@ -34,6 +35,9 @@ function render(snapshot) {
   ownerEl.textContent = owner;
   for (const [o, b] of Object.entries(buttons)) b.disabled = o === owner;
   if (rfb) rfb.viewOnly = owner !== "human";
+  requestEl.hidden = !snapshot.request;
+  requestEl.textContent = snapshot.request ? `The agent asks for help: ${snapshot.request}` : "";
+  document.title = snapshot.request ? "(!) KivoraDesk" : "KivoraDesk";
 }
 
 async function refresh() {
