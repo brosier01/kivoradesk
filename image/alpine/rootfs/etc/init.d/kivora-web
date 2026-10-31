@@ -1,0 +1,17 @@
+#!/sbin/openrc-run
+# Web gateway: live view, human takeover and input control state.
+
+description="KivoraDesk web gateway"
+
+. /etc/conf.d/kivoradesk
+
+supervisor=supervise-daemon
+command=/usr/local/bin/kivora-web
+command_args="-listen 127.0.0.1:$KIVORA_WEB_PORT -vnc 127.0.0.1:$KIVORA_VNC_PORT -state-dir /var/lib/kivora-web"
+command_user="kivora-web"
+respawn_delay=2
+
+depend() {
+	need net
+	after kivora-vnc
+}

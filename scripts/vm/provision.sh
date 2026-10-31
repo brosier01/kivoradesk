@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Copy image/alpine to the VM and run the guest provisioning script.
+# Build the guest binaries, copy image/alpine to the VM and run the guest
+# provisioning script.
 set -euo pipefail
 source "$(dirname "$0")/common.sh"
 
@@ -7,8 +8,17 @@ ip=$(vm_ip)
 [[ -n $ip ]] || die "no IP address found for VM '$VM_NAME' (is it running?)"
 mapfile -t ssh_opts < <(vm_ssh_opts)
 
+stage=$(mktemp -d)
+trap 'rm -rf "$stage"' EXIT
+cp -R "$REPO_ROOT/image/alpine/." "$stage/"
+mkdir -p "$stage/rootfs/usr/local/bin"
+
+log "building guest binaries"
+(cd "$REPO_ROOT" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+	go build -trimpath -ldflags='-s -w' -o "$stage/rootfs/usr/local/bin/kivora-web" ./cmd/kivora-web)
+
 log "provisioning $VM_NAME ($ip)"
-tar -C "$REPO_ROOT/image/alpine" -cf - . |
+tar -C "$stage" -cf - . |
 	ssh "${ssh_opts[@]}" "$VM_ADMIN@$ip" '
 		set -e
 		dir=$(mktemp -d)

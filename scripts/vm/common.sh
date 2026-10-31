@@ -9,12 +9,26 @@ VM_NAME=${VM_NAME:-kivoradesk}
 VM_VCPUS=${VM_VCPUS:-2}
 VM_MEMORY_MB=${VM_MEMORY_MB:-4096}
 VM_DISK_GB=${VM_DISK_GB:-16}
+VM_DATA_GB=${VM_DATA_GB:-16}
 VM_ADMIN=${VM_ADMIN:-kivora}
+VM_AGENT=${VM_AGENT:-agent}
+
+# Fixed MAC and DHCP reservation, so the VM keeps the same address and the
+# laptop's SSH configuration stays valid across rebuilds.
+VM_MAC=${VM_MAC:-52:54:00:6b:64:01}
+VM_IP=${VM_IP:-192.168.122.50}
+
+# Port of the web gateway inside the VM.
+WEB_PORT=${WEB_PORT:-6080}
 
 LIBVIRT_URI=${LIBVIRT_URI:-qemu:///system}
 LIBVIRT_POOL=${LIBVIRT_POOL:-kivoradesk}
 LIBVIRT_POOL_DIR=${LIBVIRT_POOL_DIR:-/var/lib/libvirt/images/kivoradesk}
 LIBVIRT_NETWORK=${LIBVIRT_NETWORK:-default}
+
+# libvirt network filter keeping the VM off private networks
+# (host/libvirt/nwfilter-no-lan.xml).
+NWFILTER=${NWFILTER:-kivoradesk-no-lan}
 
 KIVORA_DATA_DIR=${KIVORA_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/kivoradesk}
 KIVORA_CACHE_DIR=$KIVORA_DATA_DIR/cache
@@ -26,6 +40,8 @@ log() { printf '==> %s\n' "$*" >&2; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 
 virsh_() { virsh --connect "$LIBVIRT_URI" "$@"; }
+
+dhcp_host_xml() { printf "<host mac='%s' name='%s' ip='%s'/>" "$VM_MAC" "$VM_NAME" "$VM_IP"; }
 
 # vm_ip prints the first IPv4 address leased to the VM, or nothing.
 vm_ip() {
