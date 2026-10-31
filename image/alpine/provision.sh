@@ -13,7 +13,13 @@ apk update -q
 apk add -q \
 	xvfb openbox xdotool x11vnc scrot xwininfo xprop \
 	chromium font-dejavu dbus \
-	bash curl libgcc libstdc++ ripgrep
+	bash curl libgcc libstdc++ ripgrep \
+	qemu-guest-agent
+
+# The Alpine virt image exposes no ACPI power button, so libvirt shuts the
+# VM down and freezes filesystems for snapshots through the guest agent.
+rc-update add qemu-guest-agent default >/dev/null
+rc-service qemu-guest-agent start >/dev/null 2>&1 || true
 
 if ! id "$AGENT_USER" >/dev/null 2>&1; then
 	log "creating unprivileged user $AGENT_USER"

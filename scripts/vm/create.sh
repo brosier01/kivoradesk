@@ -75,6 +75,7 @@ virt-install --connect "$LIBVIRT_URI" \
 	--disk "vol=$LIBVIRT_POOL/$VM_NAME.qcow2,bus=virtio" \
 	--disk "vol=$LIBVIRT_POOL/$VM_NAME-seed.iso,device=cdrom" \
 	--network "network=$LIBVIRT_NETWORK,model=virtio" \
+	--channel unix,target.type=virtio,target.name=org.qemu.guest_agent.0 \
 	--graphics none \
 	--console pty,target_type=serial \
 	--noautoconsole >/dev/null
