@@ -1,0 +1,16 @@
+# KivoraDesk local firewall, loaded by the kivora-firewall service.
+#
+# The worker account runs the agent's shell commands. Keep it away from the
+# local services that control the desktop: Chromium DevTools, VNC and the
+# web gateway all listen on loopback.
+
+table inet kivoradesk
+delete table inet kivoradesk
+
+table inet kivoradesk {
+	chain output {
+		type filter hook output priority filter; policy accept;
+		meta skuid "worker" ip daddr 127.0.0.0/8 reject
+		meta skuid "worker" ip6 daddr ::1 reject
+	}
+}

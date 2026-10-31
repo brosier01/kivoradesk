@@ -7,7 +7,10 @@ description="KivoraDesk VNC server (x11vnc)"
 
 supervisor=supervise-daemon
 command=/usr/bin/x11vnc
-command_args="-display $KIVORA_DISPLAY -localhost -rfbport $KIVORA_VNC_PORT -forever -shared -nopw -quiet"
+# -pointer_mode 1 applies every pointer event immediately. The default mode
+# coalesces events and may drop the first one sent by a new viewer, which
+# can lose a human click.
+command_args="-display $KIVORA_DISPLAY -localhost -rfbport $KIVORA_VNC_PORT -forever -shared -nopw -quiet -pointer_mode 1"
 command_user="$KIVORA_USER:$KIVORA_USER"
 directory="/home/$KIVORA_USER"
 supervise_daemon_args="--env HOME=/home/$KIVORA_USER"
