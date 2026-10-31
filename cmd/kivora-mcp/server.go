@@ -14,6 +14,7 @@ import (
 	"github.com/brosier01/kivoradesk/internal/browser"
 	"github.com/brosier01/kivoradesk/internal/control"
 	"github.com/brosier01/kivoradesk/internal/desktop"
+	"github.com/brosier01/kivoradesk/internal/secrets"
 	"github.com/brosier01/kivoradesk/internal/worker"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -23,6 +24,7 @@ type server struct {
 	desk  *desktop.Desktop
 	br    *browser.Browser
 	work  *worker.Runner
+	vault *secrets.Store
 	audit *auditLog
 
 	mu sync.Mutex // one acting tool at a time
