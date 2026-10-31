@@ -34,6 +34,12 @@ KIVORA_DATA_DIR=${KIVORA_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/kivorade
 KIVORA_CACHE_DIR=$KIVORA_DATA_DIR/cache
 KIVORA_SSH_KEY=$KIVORA_DATA_DIR/ssh/id_ed25519
 
+# Encrypted backups of the data disk. Without the passphrase file, backups
+# cannot be restored: keep a copy of it somewhere else.
+KIVORA_BACKUP_DIR=${KIVORA_BACKUP_DIR:-$KIVORA_DATA_DIR/backups}
+KIVORA_BACKUP_KEEP=${KIVORA_BACKUP_KEEP:-7}
+KIVORA_BACKUP_PASSPHRASE=${KIVORA_BACKUP_PASSPHRASE:-$KIVORA_DATA_DIR/backup.passphrase}
+
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 
 log() { printf '==> %s\n' "$*" >&2; }

@@ -173,6 +173,28 @@ LAN router.
 Use `virsh shutdown --mode agent kivoradesk` for a clean shutdown: the Alpine
 virt image has no ACPI power button.
 
+## Maintenance
+
+All scripts run on the server and keep the data disk (`/home/agent`,
+`/workspace`: files, browser profile, logins) unless stated otherwise.
+
+```sh
+scripts/vm/backup.sh                          # encrypted backup of the data disk
+scripts/vm/backup.sh --install-cron "0 3 * * *"   # daily at 3:00 (crontab)
+scripts/vm/restore.sh --list                  # backups, most recent first
+scripts/vm/restore.sh --yes [FILE]            # reset the data (backs up the current data first)
+scripts/vm/update.sh [--reboot]               # backup, Alpine upgrade, redeploy, diagnostics
+scripts/vm/recover.sh --yes                   # rebuild a broken system around the data
+```
+
+Backups are point-in-time copies taken while the VM runs: libvirt starts the
+copy with the guest filesystem frozen for a moment, then copies in the
+background. They are encrypted with GPG (AES-256) using the passphrase in
+`~/.local/share/kivoradesk/backup.passphrase` and stored in
+`~/.local/share/kivoradesk/backups` (`KIVORA_BACKUP_DIR`), seven kept
+(`KIVORA_BACKUP_KEEP`). **Keep a copy of the passphrase file elsewhere**:
+without it, backups cannot be restored.
+
 ## Live view from the laptop
 
 The web gateway (`kivora-web`) streams the desktop with noVNC and decides who
