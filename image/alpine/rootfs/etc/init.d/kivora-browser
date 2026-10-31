@@ -16,7 +16,7 @@ command_args="
 	--remote-debugging-port=$KIVORA_CDP_PORT
 	--no-first-run
 	--no-default-browser-check
-	--disable-session-crashed-bubble
+	--hide-crash-restore-bubble
 	--window-position=0,0
 	--window-size=${geometry%x*},${geometry#*x}
 	about:blank"
@@ -28,4 +28,15 @@ respawn_delay=3
 depend() {
 	need kivora-display dbus
 	after kivora-wm
+}
+
+start_pre() {
+	# Chromium is stopped with a signal, records an unclean exit and offers
+	# to restore pages on the next start, which gets in the agent's way.
+	# Mark the last exit as clean.
+	local prefs="/home/$KIVORA_USER/.config/chromium/Default/Preferences"
+	[ -f "$prefs" ] || return 0
+	sed -i -e 's/"exit_type":"[A-Za-z]*"/"exit_type":"Normal"/' \
+		-e 's/"exited_cleanly":false/"exited_cleanly":true/' "$prefs"
+	chown "$KIVORA_USER:$KIVORA_USER" "$prefs"
 }
