@@ -147,7 +147,8 @@ func (d *Desktop) Paste(ctx context.Context, text string) error {
 	return nil
 }
 
-// Windows lists visible top-level windows.
+// Windows lists visible top-level windows that have a title. Untitled ones
+// are toolkit or window manager internals that cannot be focused.
 func (d *Desktop) Windows(ctx context.Context) ([]Window, error) {
 	out, err := d.xdotool(ctx, "search", "--onlyvisible", "--name", "")
 	if err != nil {
@@ -159,8 +160,8 @@ func (d *Desktop) Windows(ctx context.Context) ([]Window, error) {
 	var wins []Window
 	for _, id := range strings.Fields(out) {
 		w, err := d.window(ctx, id)
-		if err != nil || w.Width <= 1 || w.Height <= 1 {
-			continue // closed meanwhile, or an invisible helper window
+		if err != nil || w.Name == "" || w.Width <= 1 || w.Height <= 1 {
+			continue // closed meanwhile, or a helper window
 		}
 		wins = append(wins, w)
 	}
@@ -176,13 +177,27 @@ func (d *Desktop) ActiveWindow(ctx context.Context) (Window, error) {
 	return d.window(ctx, strings.TrimSpace(out))
 }
 
-// Focus raises and focuses a window.
+// Focus raises and focuses a window, and checks that it became active.
+// (xdotool's own --sync waits 15 seconds for windows the window manager
+// refuses to activate, then reports success.)
 func (d *Desktop) Focus(ctx context.Context, id string) error {
 	if _, err := strconv.ParseUint(id, 10, 64); err != nil {
 		return fmt.Errorf("invalid window id %q", id)
 	}
-	_, err := d.xdotool(ctx, "windowactivate", "--sync", id)
-	return err
+	if _, err := d.xdotool(ctx, "windowactivate", id); err != nil {
+		return err
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		out, err := d.xdotool(ctx, "getactivewindow")
+		if err == nil && strings.TrimSpace(out) == id {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("window %s could not be focused; pick one from computer_windows", id)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }
 
 func (d *Desktop) window(ctx context.Context, id string) (Window, error) {
