@@ -30,6 +30,12 @@ depend() {
 	after kivora-wm
 }
 
+stop_pre() {
+	# Chromium writes cookies to disk in batches: close it normally so that
+	# the latest logins survive a restart, an update or a VM shutdown.
+	/usr/local/bin/kivora-mcp browser-close -cdp "http://127.0.0.1:$KIVORA_CDP_PORT" || true
+}
+
 start_pre() {
 	# Chromium is stopped with a signal, records an unclean exit and offers
 	# to restore pages on the next start, which gets in the agent's way.
