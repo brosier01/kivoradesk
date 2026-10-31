@@ -17,7 +17,8 @@ if [[ $state != running ]]; then
 fi
 ok "VM $VM_NAME is running"
 
-if virsh_ dumpxml "$VM_NAME" | grep -q "filterref filter='$NWFILTER'"; then
+xml=$(virsh_ dumpxml "$VM_NAME")
+if [[ $xml == *"filterref filter='$NWFILTER'"* ]]; then
 	ok "network filter $NWFILTER applied"
 else
 	fail "network filter $NWFILTER missing: the VM can reach private networks"
