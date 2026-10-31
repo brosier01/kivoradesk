@@ -8,8 +8,9 @@ KivoraDesk runs an Alpine Linux VM on your own server (QEMU/KVM + libvirt).
 Claude Code stays on your laptop and drives the VM through an MCP server reached
 over SSH. You can watch the desktop live and take over at any time.
 
-> **Status:** early development. Phase 0 (feasibility) is done; the MCP server
-> and the live view are not built yet, so there is nothing to use day to day.
+> **Status:** early development. Phases 0 and 1 are done: the VM, its live
+> view and human takeover work from a laptop. The MCP server is not built yet,
+> so an agent cannot drive the desktop yet.
 
 ## How it works
 
@@ -72,8 +73,8 @@ Resources: about 313 MiB RAM used at idle, 490 MiB with three real sites open,
 | Phase | Scope | Status |
 |---|---|---|
 | 0 | Feasibility: KVM, Alpine, Chromium, CDP, native input | Done |
-| 1 | Live view from the laptop, SSH access path, persistent volumes | Next |
-| 2 | MCP server: `computer`, `browser`, `shell`, `files`, `human`; agent/human lock; LAN blocked | Planned |
+| 1 | Live view from the laptop, human takeover, SSH access path, data disk, network isolation | Done |
+| 2 | MCP server: `computer`, `browser`, `shell`, `files`, `human`; agent/human lock | Next |
 | 3 | Robustness: separate data disk, update/recover/reset, encrypted backups, audit log, secrets, mobile view | Planned |
 | 4 | Optimisation and published benchmarks | Planned |
 | 5 | Installation guide and first release | Planned |
@@ -148,6 +149,7 @@ On the server:
 scripts/vm/authorize-key.sh ~/laptop_id_ed25519.pub   # the laptop's public key
 scripts/vm/ssh-config.sh 192.168.1.66                 # how the laptop reaches the server
 scripts/vm/web-url.sh                                 # one-time sign-in URL
+scripts/vm/web-url.sh --rotate                        # new token, signs out every browser
 ```
 
 On the laptop, add the output of `ssh-config.sh` to `~/.ssh/config`, then:
