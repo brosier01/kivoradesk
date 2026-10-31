@@ -88,7 +88,8 @@ internal/rfb/       VNC client-message filter used by the gateway
 internal/cdp/       minimal Chrome DevTools Protocol client
 image/cloud-init/   first-boot configuration (admin user, SSH key)
 image/alpine/       guest provisioning script and OpenRC services
-scripts/vm/         host-side scripts: create, provision, ssh, destroy
+scripts/vm/         host-side scripts: create, provision, ssh, destroy, checks
+host/libvirt/       libvirt network filter isolating the VM
 ```
 
 ## Development VM
@@ -103,6 +104,7 @@ scripts/vm/provision.sh                 # build the gateway, install desktop and
 scripts/vm/ssh.sh                       # open a shell as the admin user
 scripts/vm/destroy.sh --yes --keep-data # rebuild the system, keep /home/agent and /workspace
 scripts/vm/destroy.sh --yes             # delete the VM and all its data
+scripts/vm/check-isolation.sh           # VM reaches the Internet, not private networks
 ```
 
 Settings (VM name, sizes, fixed IP, Alpine release, libvirt pool) can be
@@ -121,6 +123,14 @@ Inside the VM:
   `kivora-browser`, `kivora-vnc` and `kivora-web`.
 - Chromium DevTools (9222), VNC (5900) and the web gateway (6080) listen on
   localhost only. Over SSH, the `agent` account may only forward to 6080.
+
+The VM is kept off private networks by a libvirt network filter
+(`host/libvirt/nwfilter-no-lan.xml`), applied on the host so that nothing
+inside the VM can lift it. New connections to 10.0.0.0/8, 172.16.0.0/12,
+192.168.0.0/16, 169.254.0.0/16 and 100.64.0.0/10 are dropped, except DNS and
+DHCP on the libvirt gateway; the host can still open SSH sessions to the VM.
+`check-isolation.sh` verifies this against the host's own addresses and the
+LAN router.
 
 Use `virsh shutdown --mode agent kivoradesk` for a clean shutdown: the Alpine
 virt image has no ACPI power button.
