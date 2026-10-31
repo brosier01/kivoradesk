@@ -50,6 +50,12 @@ upload_volume() {
 	virsh_ vol-upload --pool "$LIBVIRT_POOL" "$1" "$3"
 }
 
+# The VM does not exist, so system and seed volumes left by an interrupted run
+# are stale. The data volume is never touched here.
+for vol in "$VM_NAME.qcow2" "$VM_NAME-seed.iso"; do
+	virsh_ vol-delete --pool "$LIBVIRT_POOL" "$vol" >/dev/null 2>&1 || true
+done
+
 log "preparing ${VM_DISK_GB}G system disk"
 cp "$base" "$work/disk.qcow2"
 qemu-img resize -q "$work/disk.qcow2" "${VM_DISK_GB}G"
@@ -74,6 +80,17 @@ else
 	virsh_ vol-create-as "$LIBVIRT_POOL" "$VM_NAME-data.qcow2" "${VM_DATA_GB}G" --format qcow2 >/dev/null
 fi
 
+log "defining network filter $NWFILTER"
+gateway=$(virsh_ net-dumpxml "$LIBVIRT_NETWORK" | sed -n "s/.*<ip address='\([0-9.]*\)'.*/\1/p" | head -n1)
+[[ -n $gateway ]] || die "could not read the gateway address of network $LIBVIRT_NETWORK"
+sed "s|@GATEWAY@|$gateway|g" "$REPO_ROOT/host/libvirt/nwfilter-no-lan.xml" >"$work/nwfilter.xml"
+# Redefining an existing filter must keep its UUID.
+uuid=$(virsh_ nwfilter-dumpxml "$NWFILTER" 2>/dev/null | sed -n 's|.*<uuid>\(.*\)</uuid>.*|\1|p')
+if [[ -n $uuid ]]; then
+	sed -i "s|<filter name='$NWFILTER' chain='root'>|&\n  <uuid>$uuid</uuid>|" "$work/nwfilter.xml"
+fi
+virsh_ nwfilter-define "$work/nwfilter.xml" >/dev/null
+
 log "reserving $VM_IP on network $LIBVIRT_NETWORK"
 virsh_ net-update "$LIBVIRT_NETWORK" delete ip-dhcp-host "$(dhcp_host_xml)" --live --config >/dev/null 2>&1 || true
 virsh_ net-update "$LIBVIRT_NETWORK" add-last ip-dhcp-host "$(dhcp_host_xml)" --live --config >/dev/null
@@ -88,7 +105,7 @@ virt-install --connect "$LIBVIRT_URI" \
 	--disk "vol=$LIBVIRT_POOL/$VM_NAME.qcow2,bus=virtio" \
 	--disk "vol=$LIBVIRT_POOL/$VM_NAME-data.qcow2,bus=virtio,serial=kivora-data" \
 	--disk "vol=$LIBVIRT_POOL/$VM_NAME-seed.iso,device=cdrom" \
-	--network "network=$LIBVIRT_NETWORK,model=virtio,mac=$VM_MAC" \
+	--network "network=$LIBVIRT_NETWORK,model=virtio,mac=$VM_MAC,filterref.filter=$NWFILTER" \
 	--channel unix,target.type=virtio,target.name=org.qemu.guest_agent.0 \
 	--graphics none \
 	--console pty,target_type=serial \

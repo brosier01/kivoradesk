@@ -26,6 +26,10 @@ LIBVIRT_POOL=${LIBVIRT_POOL:-kivoradesk}
 LIBVIRT_POOL_DIR=${LIBVIRT_POOL_DIR:-/var/lib/libvirt/images/kivoradesk}
 LIBVIRT_NETWORK=${LIBVIRT_NETWORK:-default}
 
+# libvirt network filter keeping the VM off private networks
+# (host/libvirt/nwfilter-no-lan.xml).
+NWFILTER=${NWFILTER:-kivoradesk-no-lan}
+
 KIVORA_DATA_DIR=${KIVORA_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/kivoradesk}
 KIVORA_CACHE_DIR=$KIVORA_DATA_DIR/cache
 KIVORA_SSH_KEY=$KIVORA_DATA_DIR/ssh/id_ed25519
