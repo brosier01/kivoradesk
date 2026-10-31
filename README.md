@@ -113,7 +113,7 @@ Resources: about 313 MiB RAM used at idle, 490 MiB with three real sites open,
 | 0 | Feasibility: KVM, Alpine, Chromium, CDP, native input | Done |
 | 1 | Live view from the laptop, human takeover, SSH access path, data disk, network isolation | Done |
 | 2 | MCP server: `computer`, `browser`, `shell`, `files`, `human`; agent/human lock; worker account | Done |
-| 3 | Robustness: update/recover/reset, encrypted backups, audit retention, secrets, mobile view | Next |
+| 3 | Robustness: fault recovery, timeouts, diagnostics, update/recover/reset, encrypted backups, audit retention, credentials, mobile view, network allowlist | In progress: scenario suite left |
 | 4 | Optimisation and published benchmarks | Planned |
 | 5 | Installation guide and first release | Planned |
 
