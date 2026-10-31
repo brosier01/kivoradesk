@@ -23,6 +23,13 @@ import (
 	"github.com/brosier01/kivoradesk/internal/cdp"
 )
 
+// StartupWait is how long a call waits for Chromium to come back after a
+// crash or a restart.
+const StartupWait = 30 * time.Second
+
+// NavigationTimeout bounds a navigation, including the page load.
+const NavigationTimeout = 45 * time.Second
+
 // Browser is a lazily (re)connected DevTools client.
 type Browser struct {
 	Endpoint string // DevTools HTTP endpoint, e.g. http://127.0.0.1:9222
@@ -64,9 +71,23 @@ func (b *Browser) connect(ctx context.Context) (*cdp.Conn, error) {
 	if b.conn != nil {
 		return b.conn, nil
 	}
-	ws, err := cdp.BrowserURL(ctx, b.Endpoint)
-	if err != nil {
-		return nil, fmt.Errorf("browser not reachable (is Chromium running?): %w", err)
+	// After a crash, the service manager restarts Chromium within seconds:
+	// wait for its DevTools endpoint rather than failing at once.
+	var ws string
+	var err error
+	deadline := time.Now().Add(StartupWait)
+	for {
+		if ws, err = cdp.BrowserURL(ctx, b.Endpoint); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf("browser not reachable after %v (is Chromium running?): %w", StartupWait, err)
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(500 * time.Millisecond):
+		}
 	}
 	conn, err := cdp.Dial(ctx, ws)
 	if err != nil {
@@ -201,7 +222,7 @@ func (b *Browser) retry(ctx context.Context, fn func(*cdp.Conn) error) error {
 
 func retryable(err error) bool {
 	msg := err.Error()
-	return strings.Contains(msg, "connection closed") || strings.Contains(msg, "No session with given id") ||
+	return strings.Contains(msg, "connection closed") || strings.Contains(msg, "connection reset") || strings.Contains(msg, "No session with given id") ||
 		strings.Contains(msg, "No target with given id") || strings.Contains(msg, "Session with given id not found")
 }
 
@@ -222,7 +243,12 @@ func (b *Browser) Navigate(ctx context.Context, rawURL string) (Tab, error) {
 		return Tab{}, err
 	}
 	err = b.withActive(ctx, func(_ *cdp.Conn, p *cdp.Page) error {
-		if err := p.Navigate(ctx, u); err != nil {
+		nctx, cancel := context.WithTimeout(ctx, NavigationTimeout)
+		defer cancel()
+		if err := p.Navigate(nctx, u); err != nil {
+			if errors.Is(nctx.Err(), context.DeadlineExceeded) {
+				return fmt.Errorf("navigation to %s timed out after %v (network down or site unreachable?)", u, NavigationTimeout)
+			}
 			return err
 		}
 		return waitLoaded(ctx, p)

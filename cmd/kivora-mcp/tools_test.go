@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/brosier01/kivoradesk/internal/control"
 	"github.com/brosier01/kivoradesk/internal/desktop"
@@ -29,7 +30,7 @@ func connect(t *testing.T, owner control.Owner) (*mcp.ClientSession, *control.St
 	go httpSrv.Serve(ln)
 	t.Cleanup(func() { httpSrv.Close() })
 
-	audit, err := openAudit(filepath.Join(t.TempDir(), "audit.log"))
+	audit, err := openAudit(t.TempDir(), time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -5,9 +5,8 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -50,16 +49,36 @@ func add[In any](srv *mcp.Server, s *server, k kind, tool *mcp.Tool, h handler[I
 	if tool.Annotations == nil {
 		tool.Annotations = &mcp.ToolAnnotations{ReadOnlyHint: ro, DestructiveHint: &destructive, OpenWorldHint: &open}
 	}
+	limit := toolTimeout(tool.Name)
 	mcp.AddTool(srv, tool, func(ctx context.Context, _ *mcp.CallToolRequest, in In) (*mcp.CallToolResult, any, error) {
 		trace := newTrace()
 		start := time.Now()
+		ctx, cancel := context.WithTimeout(ctx, limit)
+		defer cancel()
 		content, err := s.guard(ctx, k, func() ([]mcp.Content, error) { return h(ctx, in) })
+		if err != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			err = fmt.Errorf("%s timed out after %v: %v", tool.Name, limit, err)
+		}
 		s.audit.record(trace, tool.Name, in, err, time.Since(start))
 		if err != nil {
 			return nil, nil, fmt.Errorf("%v [trace %s]", err, trace)
 		}
 		return &mcp.CallToolResult{Content: content}, nil, nil
 	})
+}
+
+// toolTimeout is the maximum duration of one call. Tools with their own
+// duration argument get a margin above its upper bound.
+func toolTimeout(name string) time.Duration {
+	switch name {
+	case "shell_run", "human_wait_for_control":
+		return 11 * time.Minute
+	case "browser_download":
+		return 10 * time.Minute
+	case "computer_type":
+		return 5 * time.Minute
+	}
+	return 2 * time.Minute
 }
 
 func (s *server) guard(ctx context.Context, k kind, fn func() ([]mcp.Content, error)) ([]mcp.Content, error) {
@@ -148,40 +167,3 @@ func newTrace() string {
 	rand.Read(b)
 	return hex.EncodeToString(b)
 }
-
-// auditLog appends one JSON line per tool call.
-type auditLog struct {
-	mu sync.Mutex
-	f  *os.File
-}
-
-func openAudit(path string) (*auditLog, error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return nil, err
-	}
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
-	if err != nil {
-		return nil, err
-	}
-	return &auditLog{f: f}, nil
-}
-
-func (a *auditLog) record(trace, tool string, in any, err error, d time.Duration) {
-	args, _ := json.Marshal(in)
-	if len(args) > 2000 {
-		args = append(args[:2000:2000], []byte("...")...)
-	}
-	entry := map[string]any{
-		"time": time.Now().UTC().Format(time.RFC3339Nano), "trace": trace, "tool": tool,
-		"args": string(args), "ok": err == nil, "ms": d.Milliseconds(),
-	}
-	if err != nil {
-		entry["error"] = err.Error()
-	}
-	line, _ := json.Marshal(entry)
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.f.Write(append(line, '\n'))
-}
-
-func (a *auditLog) Close() error { return a.f.Close() }
