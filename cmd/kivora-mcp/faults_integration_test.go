@@ -46,7 +46,7 @@ func TestFaultChromiumCrash(t *testing.T) {
 	e := setupHost(t)
 	e.call("browser_navigate", map[string]any{"url": "https://example.com"}, false)
 
-	admin(t, "doas pkill -KILL -f /usr/lib/chromium/chromium")
+	admin(t, "doas pkill -KILL -f '[/]usr/lib/chromium/chromium'")
 	start := time.Now()
 	out, _ := e.call("browser_navigate", map[string]any{"url": "https://example.com"}, false)
 	e.mustContain(out, "example.com")

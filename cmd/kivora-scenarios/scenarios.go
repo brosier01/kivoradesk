@@ -557,7 +557,7 @@ var scenarios = []scenario{
 		return contains(echo, value)
 	}},
 	{name: "chromium_crash", host: true, run: func(r *runner) error {
-		if _, err := r.script("", "ssh.sh", "doas pkill -KILL -f /usr/lib/chromium/chromium"); err != nil {
+		if _, err := r.script("", "ssh.sh", "doas pkill -KILL -f '[/]usr/lib/chromium/chromium'"); err != nil {
 			return err
 		}
 		out, err := r.navigate("https://example.com")
