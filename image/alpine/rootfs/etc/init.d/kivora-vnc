@@ -15,6 +15,9 @@ command_user="$KIVORA_USER:$KIVORA_USER"
 directory="/home/$KIVORA_USER"
 supervise_daemon_args="--env HOME=/home/$KIVORA_USER"
 respawn_delay=2
+# Restart after crashes, giving up only on a crash loop (5 within a minute).
+respawn_max=5
+respawn_period=60
 
 depend() {
 	need kivora-display
