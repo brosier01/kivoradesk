@@ -1,0 +1,33 @@
+# Product docs kept local
+/PRD.md
+
+# Claude Code working files
+CLAUDE.md
+CLAUDE.local.md
+.claude/
+.mcp.json
+
+# Build output
+/bin/
+/dist/
+*.test
+*.out
+coverage.*
+
+# VM images and artifacts
+*.qcow2
+*.img
+*.iso
+/images/
+/build/
+
+# Local environment
+.env
+.env.*
+*.local
+
+# Editors and OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
