@@ -1,0 +1,15 @@
+# Shared settings for the kivora-* OpenRC services.
+
+# Unprivileged account that owns the desktop session.
+KIVORA_USER="agent"
+
+# X display number and screen geometry. The geometry is the coordinate space
+# used by every Computer Use action, so keep it fixed.
+KIVORA_DISPLAY=":1"
+KIVORA_SCREEN="1280x800x24"
+
+# Chromium DevTools port, bound to localhost only.
+KIVORA_CDP_PORT="9222"
+
+# VNC port, bound to localhost only; reach it through an SSH tunnel.
+KIVORA_VNC_PORT="5900"

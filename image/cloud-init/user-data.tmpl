@@ -1,0 +1,25 @@
+#cloud-config
+# Minimal bootstrap: an admin account reachable over SSH with a key.
+# Everything else is done by image/alpine/provision.sh so it stays re-runnable.
+hostname: @HOSTNAME@
+ssh_pwauth: false
+disable_root: true
+
+users:
+  - name: @ADMIN@
+    groups: [wheel]
+    shell: /bin/sh
+    lock_passwd: true
+    ssh_authorized_keys:
+      - @SSH_PUBKEY@
+
+write_files:
+  - path: /etc/doas.d/@ADMIN@.conf
+    permissions: "0400"
+    content: |
+      permit nopass @ADMIN@
+
+# Alpine's sshd rejects every login, keys included, for an account whose
+# shadow entry starts with "!". Use "*" instead: no usable password, not locked.
+runcmd:
+  - sed -i 's/^@ADMIN@:!:/@ADMIN@:*:/' /etc/shadow

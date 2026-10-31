@@ -1,0 +1,18 @@
+#!/sbin/openrc-run
+# VNC view of the KivoraDesk display, listening on localhost only.
+
+description="KivoraDesk VNC server (x11vnc)"
+
+. /etc/conf.d/kivoradesk
+
+supervisor=supervise-daemon
+command=/usr/bin/x11vnc
+command_args="-display $KIVORA_DISPLAY -localhost -rfbport $KIVORA_VNC_PORT -forever -shared -nopw -quiet"
+command_user="$KIVORA_USER:$KIVORA_USER"
+directory="/home/$KIVORA_USER"
+supervise_daemon_args="--env HOME=/home/$KIVORA_USER"
+respawn_delay=2
+
+depend() {
+	need kivora-display
+}
