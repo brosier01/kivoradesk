@@ -1,0 +1,58 @@
+# Shared settings for the host-side VM scripts. Sourced, not executed.
+
+ALPINE_BRANCH=${ALPINE_BRANCH:-v3.24}
+ALPINE_RELEASE=${ALPINE_RELEASE:-3.24.3}
+ALPINE_IMAGE=${ALPINE_IMAGE:-alpine-${ALPINE_RELEASE}-x86_64-cloudinit-r0.qcow2}
+ALPINE_MIRROR=${ALPINE_MIRROR:-https://dl-cdn.alpinelinux.org/alpine}
+
+VM_NAME=${VM_NAME:-kivoradesk}
+VM_VCPUS=${VM_VCPUS:-2}
+VM_MEMORY_MB=${VM_MEMORY_MB:-4096}
+VM_DISK_GB=${VM_DISK_GB:-16}
+VM_DATA_GB=${VM_DATA_GB:-16}
+VM_ADMIN=${VM_ADMIN:-kivora}
+VM_AGENT=${VM_AGENT:-agent}
+
+# Fixed MAC and DHCP reservation, so the VM keeps the same address and the
+# laptop's SSH configuration stays valid across rebuilds.
+VM_MAC=${VM_MAC:-52:54:00:6b:64:01}
+VM_IP=${VM_IP:-192.168.122.50}
+
+# Port of the web gateway inside the VM.
+WEB_PORT=${WEB_PORT:-6080}
+
+LIBVIRT_URI=${LIBVIRT_URI:-qemu:///system}
+LIBVIRT_POOL=${LIBVIRT_POOL:-kivoradesk}
+LIBVIRT_POOL_DIR=${LIBVIRT_POOL_DIR:-/var/lib/libvirt/images/kivoradesk}
+LIBVIRT_NETWORK=${LIBVIRT_NETWORK:-default}
+
+# libvirt network filter keeping the VM off private networks
+# (host/libvirt/nwfilter-no-lan.xml).
+NWFILTER=${NWFILTER:-kivoradesk-no-lan}
+
+KIVORA_DATA_DIR=${KIVORA_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/kivoradesk}
+KIVORA_CACHE_DIR=$KIVORA_DATA_DIR/cache
+KIVORA_SSH_KEY=$KIVORA_DATA_DIR/ssh/id_ed25519
+
+REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+
+log() { printf '==> %s\n' "$*" >&2; }
+die() { printf 'error: %s\n' "$*" >&2; exit 1; }
+
+virsh_() { virsh --connect "$LIBVIRT_URI" "$@"; }
+
+dhcp_host_xml() { printf "<host mac='%s' name='%s' ip='%s'/>" "$VM_MAC" "$VM_NAME" "$VM_IP"; }
+
+# vm_ip prints the first IPv4 address leased to the VM, or nothing.
+vm_ip() {
+	virsh_ domifaddr "$VM_NAME" --source lease 2>/dev/null |
+		awk '/ipv4/ { split($4, a, "/"); print a[1]; exit }'
+}
+
+vm_ssh_opts() {
+	printf '%s\n' -i "$KIVORA_SSH_KEY" \
+		-o StrictHostKeyChecking=no \
+		-o UserKnownHostsFile=/dev/null \
+		-o LogLevel=ERROR \
+		-o ConnectTimeout=5
+}

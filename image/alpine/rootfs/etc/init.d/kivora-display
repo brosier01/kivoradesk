@@ -1,0 +1,42 @@
+#!/sbin/openrc-run
+# Virtual X11 display shared by the agent and the human viewer.
+
+description="KivoraDesk virtual display (Xvfb)"
+
+. /etc/conf.d/kivoradesk
+
+# Only clients holding this cookie may connect: the desktop user's processes.
+xauthority="/home/$KIVORA_USER/.Xauthority"
+
+supervisor=supervise-daemon
+command=/usr/bin/Xvfb
+command_args="$KIVORA_DISPLAY -screen 0 $KIVORA_SCREEN -nolisten tcp -auth $xauthority"
+command_user="$KIVORA_USER:$KIVORA_USER"
+respawn_delay=2
+
+depend() {
+	need localmount
+	after bootmisc
+}
+
+as_user() {
+	su -s /bin/sh "$KIVORA_USER" -c "XAUTHORITY=$xauthority DISPLAY=$KIVORA_DISPLAY $*"
+}
+
+start_pre() {
+	# A fresh cookie on every start, readable by the desktop user only.
+	local cookie
+	cookie=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
+	rm -f "$xauthority"
+	as_user "umask 077; : >$xauthority; xauth -q -f $xauthority add $KIVORA_DISPLAY . $cookie"
+}
+
+start_post() {
+	# Wait for the display to accept clients before dependents start.
+	local i=0
+	while ! as_user "xprop -root >/dev/null 2>&1"; do
+		i=$((i + 1))
+		[ $i -ge 50 ] && { eerror "display $KIVORA_DISPLAY did not come up"; return 1; }
+		sleep 0.1
+	done
+}

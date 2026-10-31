@@ -1,0 +1,42 @@
+#!/sbin/openrc-run
+# Chromium on the KivoraDesk display, with a persistent profile and a
+# DevTools endpoint reachable from inside the VM only.
+
+description="KivoraDesk browser (Chromium)"
+
+. /etc/conf.d/kivoradesk
+
+geometry=${KIVORA_SCREEN%x*}
+
+supervisor=supervise-daemon
+command=/usr/bin/chromium-browser
+command_args="
+	--user-data-dir=/home/$KIVORA_USER/.config/chromium
+	--remote-debugging-address=127.0.0.1
+	--remote-debugging-port=$KIVORA_CDP_PORT
+	--no-first-run
+	--no-default-browser-check
+	--hide-crash-restore-bubble
+	--window-position=0,0
+	--window-size=${geometry%x*},${geometry#*x}
+	about:blank"
+command_user="$KIVORA_USER:$KIVORA_USER"
+directory="/home/$KIVORA_USER"
+supervise_daemon_args="--env DISPLAY=$KIVORA_DISPLAY --env HOME=/home/$KIVORA_USER"
+respawn_delay=3
+
+depend() {
+	need kivora-display dbus
+	after kivora-wm
+}
+
+start_pre() {
+	# Chromium is stopped with a signal, records an unclean exit and offers
+	# to restore pages on the next start, which gets in the agent's way.
+	# Mark the last exit as clean.
+	local prefs="/home/$KIVORA_USER/.config/chromium/Default/Preferences"
+	[ -f "$prefs" ] || return 0
+	sed -i -e 's/"exit_type":"[A-Za-z]*"/"exit_type":"Normal"/' \
+		-e 's/"exited_cleanly":false/"exited_cleanly":true/' "$prefs"
+	chown "$KIVORA_USER:$KIVORA_USER" "$prefs"
+}
