@@ -4,6 +4,9 @@
 set -eu
 
 AGENT_USER=${AGENT_USER:-agent}
+# Fixed UID: files on the data disk must keep their owner when the system
+# disk is rebuilt.
+AGENT_UID=${AGENT_UID:-1100}
 WEB_USER=${WEB_USER:-kivora-web}
 WORKSPACE=${WORKSPACE:-/workspace}
 DATA_DIR=/data
@@ -52,7 +55,7 @@ rc-service qemu-guest-agent start >/dev/null 2>&1 || true
 
 if ! id "$AGENT_USER" >/dev/null 2>&1; then
 	log "creating unprivileged user $AGENT_USER"
-	adduser -D -s /bin/bash -g "KivoraDesk agent" "$AGENT_USER"
+	adduser -D -u "$AGENT_UID" -s /bin/bash -g "KivoraDesk agent" "$AGENT_USER"
 fi
 # Alpine's sshd refuses accounts whose shadow entry starts with "!", keys
 # included. "*" means no usable password without locking key logins.
@@ -82,6 +85,15 @@ if [ -n "$disk" ]; then
 else
 	log "no data disk (serial $DATA_SERIAL): keeping data on the system disk"
 fi
+
+# A data disk from an older VM may carry another UID for the agent.
+uid=$(id -u "$AGENT_USER")
+for dir in "/home/$AGENT_USER" "$WORKSPACE"; do
+	if [ -d "$dir" ] && [ "$(stat -c %u "$dir")" != "$uid" ]; then
+		log "fixing ownership of $dir"
+		chown -R "$AGENT_USER:$AGENT_USER" "$dir"
+	fi
+done
 
 log "preparing $WORKSPACE"
 mkdir -p "$WORKSPACE"
