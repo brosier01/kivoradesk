@@ -8,9 +8,9 @@ KivoraDesk runs an Alpine Linux VM on your own server (QEMU/KVM + libvirt).
 Claude Code stays on your laptop and drives the VM through an MCP server reached
 over SSH. You can watch the desktop live and take over at any time.
 
-> **Status:** early development. The VM, its live view, human takeover and the
-> MCP server work end to end over SSH; Phase 2 is being validated with Claude
-> Code from a laptop.
+> **Status:** early development. Phases 0 to 2 are done: Claude Code on a
+> laptop drives the VM through the MCP server (web research, forms, PDFs,
+> shell, files) while the human watches and can take over.
 
 ## How it works
 
@@ -101,8 +101,8 @@ Resources: about 313 MiB RAM used at idle, 490 MiB with three real sites open,
 |---|---|---|
 | 0 | Feasibility: KVM, Alpine, Chromium, CDP, native input | Done |
 | 1 | Live view from the laptop, human takeover, SSH access path, data disk, network isolation | Done |
-| 2 | MCP server: `computer`, `browser`, `shell`, `files`, `human`; agent/human lock; worker account | In validation |
-| 3 | Robustness: update/recover/reset, encrypted backups, audit retention, secrets, mobile view | Planned |
+| 2 | MCP server: `computer`, `browser`, `shell`, `files`, `human`; agent/human lock; worker account | Done |
+| 3 | Robustness: update/recover/reset, encrypted backups, audit retention, secrets, mobile view | Next |
 | 4 | Optimisation and published benchmarks | Planned |
 | 5 | Installation guide and first release | Planned |
 
