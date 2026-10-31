@@ -11,5 +11,8 @@ KIVORA_SCREEN="1280x800x24"
 # Chromium DevTools port, bound to localhost only.
 KIVORA_CDP_PORT="9222"
 
-# VNC port, bound to localhost only; reach it through an SSH tunnel.
+# VNC port, bound to localhost only. Viewers go through the web gateway.
 KIVORA_VNC_PORT="5900"
+
+# Web gateway port, bound to localhost only; reach it through an SSH tunnel.
+KIVORA_WEB_PORT="6080"
