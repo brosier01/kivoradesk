@@ -11,6 +11,11 @@ KIVORA_SCREEN="1280x800x24"
 # Chromium DevTools port, bound to localhost only.
 KIVORA_CDP_PORT="9222"
 
+# Extra Chromium command-line flags. The VM has no GPU: without
+# --disable-gpu, Chromium emulates one in a separate process for nothing
+# (no WebGL either way) and uses about 50 MiB more.
+KIVORA_BROWSER_FLAGS="--disable-gpu"
+
 # VNC port, bound to localhost only. Viewers go through the web gateway.
 KIVORA_VNC_PORT="5900"
 

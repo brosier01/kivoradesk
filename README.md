@@ -8,10 +8,11 @@ KivoraDesk runs an Alpine Linux VM on your own server (QEMU/KVM + libvirt).
 Claude Code stays on your laptop and drives the VM through an MCP server reached
 over SSH. You can watch the desktop live and take over at any time.
 
-> **Status:** early development. Phases 0 to 3 are done: Claude Code on a
+> **Status:** early development. Phases 0 to 4 are done: Claude Code on a
 > laptop drives the VM through the MCP server (web research, forms, PDFs,
 > shell, files, credentials) while the human watches and can take over, with
-> backups, recovery and a 30-scenario reliability suite at 100 %.
+> backups, recovery, a 30-scenario reliability suite at 100 % and a
+> published [benchmark](docs/benchmark.md).
 
 ## How it works
 
@@ -104,8 +105,11 @@ The MCP server avoids that limit: `computer_type` pastes non-ASCII text
 through the clipboard (100/100 exact in the end-to-end test) and
 `browser_type` inserts text through CDP.
 
-Resources: about 313 MiB RAM used at idle, 490 MiB with three real sites open,
-1 GiB of disk. A new VM is created and provisioned in under a minute.
+Resources: see the [benchmark](docs/benchmark.md). In short, with 2 vCPU and
+4 GiB: 880 MiB of system disk, about 570 MiB of memory used at idle and
+870 MiB with three real sites open, CPU near zero at idle, and 13 s from a
+reboot to working MCP tools. A new VM is created and provisioned in under a
+minute.
 
 ## Roadmap
 
@@ -115,12 +119,13 @@ Resources: about 313 MiB RAM used at idle, 490 MiB with three real sites open,
 | 1 | Live view from the laptop, human takeover, SSH access path, data disk, network isolation | Done |
 | 2 | MCP server: `computer`, `browser`, `shell`, `files`, `human`; agent/human lock; worker account | Done |
 | 3 | Robustness: fault recovery, timeouts, diagnostics, update/recover/reset, encrypted backups, audit retention, credentials, mobile view, network allowlist, scenario suite | Done |
-| 4 | Optimisation and published benchmarks | Planned |
+| 4 | Optimisation and published benchmarks | Done |
 | 5 | Installation guide and first release | Planned |
 
 ## Repository layout
 
 ```text
+cmd/kivora-bench/   resource and latency benchmark, A/B comparison
 cmd/kivora-mcp/     MCP server (and the worker helper it runs as worker)
 cmd/kivora-probe/   input accuracy probe, runs inside the VM
 cmd/kivora-scenarios/ workflow reliability suite over MCP
@@ -271,6 +276,20 @@ bin/kivora-scenarios -mcp "ssh -i $KEY -T agent@192.168.122.50 /usr/local/bin/ki
 Result on 2026-11-01 (Alpine 3.24, Chromium 155, 2 vCPU, 4 GiB): **300/300
 runs passed (100 %)**, 10 runs per scenario. Without Internet, navigation
 fails with an explicit error, at once or after its 45-second timeout.
+
+## Benchmark
+
+`kivora-bench` reboots the VM and measures boot time, disk use, memory by
+component, idle CPU, the latency of the main tools and memory with real sites
+open. `-compare` shows the change between two runs, to judge an optimization.
+Results and method: [docs/benchmark.md](docs/benchmark.md).
+
+```sh
+go build -o bin/kivora-bench ./cmd/kivora-bench
+bin/kivora-bench -label before -out before.json   # then change something
+bin/kivora-bench -label after -out after.json
+bin/kivora-bench -compare before.json after.json
+```
 
 ## Tests
 

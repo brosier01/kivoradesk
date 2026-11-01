@@ -5,6 +5,49 @@ All notable changes to KivoraDesk are documented here. The format follows
 [Semantic Versioning](https://semver.org/). Before 1.0, minor versions may
 break compatibility.
 
+## 0.3.0 - 2026-11-01
+
+Optimization: a lighter VM that boots in half the time, with a published
+benchmark and the tool to reproduce it.
+
+### Added
+
+- **Benchmark.** `kivora-bench` reboots the VM and measures each boot stage,
+  disk use, idle memory by component and CPU, the latency of the main MCP
+  tools and memory with real sites open; `-compare` shows the change between
+  two runs for A/B tests. Results and method in `docs/benchmark.md`.
+- `KIVORA_BROWSER_FLAGS` in `/etc/conf.d/kivoradesk` for extra Chromium flags.
+
+### Changed
+
+- Reboot to working MCP tools: 29.5 s → 13.3 s. The boot menu waits 1 s
+  instead of 10 s, and dhcpcd no longer probes for address conflicts (the
+  address is reserved on the libvirt network).
+- System disk: 1021 → 880 MiB, 453 → 315 packages. Only the noVNC web client
+  is installed (no websockify, Python or NumPy), and cloud-init is removed
+  once the first boot is done.
+- Chromium starts with `--disable-gpu`: the VM has no GPU, and the emulated
+  one cost about 50 MiB with no WebGL either way.
+- `/tmp` is emptied at boot; Chromium left directories there after crashes.
+
+### Fixed
+
+- After a rebuild of the system disk (`recover.sh`) followed by a reboot, the
+  KivoraDesk services could stay stopped: OpenRC kept a dependency cache
+  written in the same second as the service scripts. The cache is now rebuilt
+  after the services are installed.
+
+### Measured
+
+- Tool latency unchanged (for example screenshot 50 ms, navigation 38 ms,
+  page reading 2 ms at the median).
+- Scenario suite: 300/300 runs after the changes, on a rebuilt VM too.
+
+### Known limitations
+
+- Memory used at idle drops by 4 % only (598 → 572 MiB): Chromium is most of
+  it.
+
 ## 0.2.0 - 2026-11-01
 
 Robustness and day-to-day operation: the computer recovers from failures,
