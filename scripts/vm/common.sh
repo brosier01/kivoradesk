@@ -33,6 +33,10 @@ NWFILTER=${NWFILTER:-kivoradesk-no-lan}
 KIVORA_ALLOWLIST=${KIVORA_ALLOWLIST:-${XDG_DATA_HOME:-$HOME/.local/share}/kivoradesk/allowlist}
 
 KIVORA_DATA_DIR=${KIVORA_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/kivoradesk}
+# Private to this account: it holds the SSH key, the passphrase of the backups
+# and the backups themselves.
+mkdir -p "$KIVORA_DATA_DIR"
+chmod 700 "$KIVORA_DATA_DIR"
 KIVORA_CACHE_DIR=$KIVORA_DATA_DIR/cache
 KIVORA_SSH_KEY=$KIVORA_DATA_DIR/ssh/id_ed25519
 KIVORA_KNOWN_HOSTS=$KIVORA_DATA_DIR/ssh/known_hosts
