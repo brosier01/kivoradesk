@@ -24,7 +24,7 @@ VAULT_DIR=/var/lib/kivora-vault
 WORKSPACE=${WORKSPACE:-/workspace}
 DATA_DIR=/data
 DATA_SERIAL=kivora-data
-SERVICES="kivora-firewall kivora-display kivora-wm kivora-browser kivora-vnc kivora-web"
+SERVICES="kivora-hidepid kivora-firewall kivora-display kivora-wm kivora-browser kivora-vnc kivora-web"
 
 log() { printf '==> %s\n' "$*" >&2; }
 

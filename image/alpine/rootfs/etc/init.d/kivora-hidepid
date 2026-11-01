@@ -1,0 +1,21 @@
+#!/sbin/openrc-run
+# Hide each account's processes from the others: the worker runs code the agent
+# chose, and command lines may hold what the desktop is doing.
+
+description="KivoraDesk process isolation"
+
+depend() {
+	need localmount
+	before kivora-firewall kivora-display sshd
+}
+
+start() {
+	ebegin "Hiding processes between accounts"
+	mount -o remount,hidepid=2 /proc
+	eend $?
+}
+
+stop() {
+	ebegin "Leaving processes hidden until the next boot"
+	eend 0
+}
