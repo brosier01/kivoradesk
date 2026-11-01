@@ -42,17 +42,21 @@ data_disk() {
 }
 
 # bind_to_data moves DIR onto the data disk (first time only) and bind-mounts
-# it back in place.
+# it back in place, without setuid programs or device files.
 bind_to_data() {
 	dir=$1 target=$DATA_DIR$1
-	mountpoint -q "$dir" && return
-	if [ ! -d "$target" ]; then
-		mkdir -p "$target"
-		[ -d "$dir" ] && cp -a "$dir/." "$target/"
+	sed -i "s|^$target $dir none bind 0 0$|$target $dir none bind,noatime,nosuid,nodev 0 0|" /etc/fstab
+	if ! mountpoint -q "$dir"; then
+		if [ ! -d "$target" ]; then
+			mkdir -p "$target"
+			[ -d "$dir" ] && cp -a "$dir/." "$target/"
+		fi
+		mkdir -p "$dir"
+		grep -q "^$target $dir " /etc/fstab || echo "$target $dir none bind,noatime,nosuid,nodev 0 0" >>/etc/fstab
+		mount "$dir"
 	fi
-	mkdir -p "$dir"
-	grep -q "^$target $dir " /etc/fstab || echo "$target $dir none bind 0 0" >>/etc/fstab
-	mount "$dir"
+	# A bind mount only takes its options on a remount.
+	mount -o remount,bind,noatime,nosuid,nodev "$dir"
 }
 
 log "installing packages"
@@ -138,9 +142,11 @@ if [ -n "$disk" ]; then
 		mkfs.ext4 -q -L "$DATA_SERIAL" "$disk"
 	fi
 	mkdir -p "$DATA_DIR"
+	sed -i "s|^LABEL=$DATA_SERIAL $DATA_DIR ext4 defaults,noatime 0 2$|LABEL=$DATA_SERIAL $DATA_DIR ext4 defaults,noatime,nosuid,nodev 0 2|" /etc/fstab
 	grep -q "^LABEL=$DATA_SERIAL " /etc/fstab ||
-		echo "LABEL=$DATA_SERIAL $DATA_DIR ext4 defaults,noatime 0 2" >>/etc/fstab
+		echo "LABEL=$DATA_SERIAL $DATA_DIR ext4 defaults,noatime,nosuid,nodev 0 2" >>/etc/fstab
 	mountpoint -q "$DATA_DIR" || mount "$DATA_DIR"
+	mount -o remount,noatime,nosuid,nodev "$DATA_DIR"
 	if ! mountpoint -q "/home/$AGENT_USER"; then
 		for svc in $SERVICES; do rc-service -q "$svc" stop 2>/dev/null || true; done
 	fi
@@ -214,6 +220,8 @@ chmod 0755 /etc/init.d/kivora-* /usr/local/bin/kivora-*
 chmod 0400 /etc/doas.d/*.conf
 chmod 0755 /etc/chromium/policies /etc/chromium/policies/managed
 chmod 0644 /etc/chromium/policies/managed/*.json
+chmod 0644 /etc/sysctl.d/kivoradesk.conf
+sysctl -q -p /etc/sysctl.d/kivoradesk.conf
 doas -C /etc/doas.d/kivora-mcp.conf
 # OpenRC compares its dependency cache with the scripts to the second: a
 # cache rebuilt in the second the scripts were copied looks current without

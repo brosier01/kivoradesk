@@ -40,6 +40,8 @@ done
 for mnt in /data /home/agent /workspace /var/lib/kivora-vault /etc/ssh/authorized_keys; do
 	mountpoint -q "$mnt" && echo "ok mount $mnt" || echo "fail mount $mnt is not mounted"
 done
+grep -E ' /(workspace|data) ' /proc/mounts | grep -qv 'nosuid.*nodev' && echo "fail data disk mounted with setuid programs or devices" || echo "ok data disk without setuid programs or devices"
+[ "$(sysctl -n fs.protected_regular 2>/dev/null)" = 2 ] && echo "ok kernel settings applied" || echo "fail kernel settings are not applied"
 [ "$(stat -c '%U %a' /var/lib/kivora-vault 2>/dev/null)" = "kivora-vault 700" ] && echo "ok credentials private to the vault account" || echo "fail credentials are not private to the vault account"
 [ "$(nft list table inet kivoradesk 2>/dev/null | grep -c 'fib daddr type local')" = 3 ] && echo "ok firewall rules loaded" || echo "fail firewall rules are missing"
 grep -q ' /proc proc .*hidepid' /proc/mounts && echo "ok processes hidden between accounts" || echo "fail processes are not hidden between accounts"
