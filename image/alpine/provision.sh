@@ -52,9 +52,41 @@ log "installing packages"
 apk update -q
 apk add -q \
 	xvfb xauth openbox xdotool x11vnc scrot xwininfo xprop \
-	chromium font-dejavu dbus novnc \
+	chromium font-dejavu dbus \
 	bash curl libgcc libstdc++ ripgrep xclip \
 	e2fsprogs acl nftables qemu-guest-agent
+
+# Only noVNC's web client is needed: the package also pulls websockify,
+# Python and NumPy, which the kivora-web gateway replaces.
+log "installing the noVNC web client"
+apk info -e novnc >/dev/null && apk del -q novnc
+novnc_tmp=$(mktemp -d)
+(cd "$novnc_tmp" && apk fetch -q novnc && mkdir root && apk extract -q --destination root novnc-*.apk >/dev/null)
+rm -rf /usr/share/novnc
+mv "$novnc_tmp/root/usr/share/novnc" /usr/share/novnc
+rm -rf "$novnc_tmp"
+
+# cloud-init only matters on the first boot, which created the admin
+# account, the SSH keys and the network configuration. Afterwards it slows
+# every boot down and keeps Python installed.
+if apk info -e cloud-init >/dev/null; then
+	log "removing cloud-init"
+	cloud-init status --wait >/dev/null 2>&1 || true # first boot finished
+	apk del -q cloud-init
+fi
+for svc in cloud-final cloud-config cloud-init cloud-init-hotplugd cloud-init-local cloud-getty; do
+	rc-update -a del "$svc" >/dev/null 2>&1 || true
+done
+
+# The VM's address is reserved for its MAC on the libvirt network: skip the
+# ARP probe for conflicts, which holds every service back for 5 s at boot.
+grep -qx noarp /etc/dhcpcd.conf 2>/dev/null || echo noarp >>/etc/dhcpcd.conf
+
+# Empty /tmp at boot: Chromium leaves directories there when it crashes.
+sed -i 's/^wipe_tmp=.*/wipe_tmp="YES"/' /etc/conf.d/bootmisc
+
+# Boot without waiting at the boot menu.
+[ -f /boot/limine/limine.conf ] && sed -i 's/^timeout: .*/timeout: 1/' /boot/limine/limine.conf
 
 # The Alpine virt image exposes no ACPI power button, so libvirt shuts the
 # VM down and freezes filesystems for snapshots through the guest agent.
@@ -129,6 +161,11 @@ cp -R rootfs/. /
 chmod 0755 /etc/init.d/kivora-* /usr/local/bin/kivora-*
 chmod 0400 /etc/doas.d/*.conf
 doas -C /etc/doas.d/kivora-mcp.conf
+# OpenRC compares its dependency cache with the scripts to the second: a
+# cache rebuilt in the second the scripts were copied looks current without
+# them, is saved at shutdown and leaves the services stopped at the next
+# boot. Rebuild it now.
+rc-update -u >/dev/null
 rc-service sshd reload >/dev/null
 
 # Stop in reverse order, then start in order: restarting the display alone
