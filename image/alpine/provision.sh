@@ -23,6 +23,10 @@ VAULT_UID=${VAULT_UID:-1102}
 VAULT_DIR=/var/lib/kivora-vault
 # The agent's SSH keys, on the data disk but out of its reach.
 KEYS_DIR=/etc/ssh/authorized_keys
+# The audit log, on the data disk, out of the agent's reach.
+AUDIT_USER=${AUDIT_USER:-kivora-audit}
+AUDIT_UID=${AUDIT_UID:-1103}
+AUDIT_DIR=/var/lib/kivora-audit
 WORKSPACE=${WORKSPACE:-/workspace}
 DATA_DIR=/data
 DATA_SERIAL=kivora-data
@@ -42,17 +46,21 @@ data_disk() {
 }
 
 # bind_to_data moves DIR onto the data disk (first time only) and bind-mounts
-# it back in place.
+# it back in place, without setuid programs or device files.
 bind_to_data() {
 	dir=$1 target=$DATA_DIR$1
-	mountpoint -q "$dir" && return
-	if [ ! -d "$target" ]; then
-		mkdir -p "$target"
-		[ -d "$dir" ] && cp -a "$dir/." "$target/"
+	sed -i "s|^$target $dir none bind 0 0$|$target $dir none bind,noatime,nosuid,nodev 0 0|" /etc/fstab
+	if ! mountpoint -q "$dir"; then
+		if [ ! -d "$target" ]; then
+			mkdir -p "$target"
+			[ -d "$dir" ] && cp -a "$dir/." "$target/"
+		fi
+		mkdir -p "$dir"
+		grep -q "^$target $dir " /etc/fstab || echo "$target $dir none bind,noatime,nosuid,nodev 0 0" >>/etc/fstab
+		mount "$dir"
 	fi
-	mkdir -p "$dir"
-	grep -q "^$target $dir " /etc/fstab || echo "$target $dir none bind 0 0" >>/etc/fstab
-	mount "$dir"
+	# A bind mount only takes its options on a remount.
+	mount -o remount,bind,noatime,nosuid,nodev "$dir"
 }
 
 log "installing packages"
@@ -129,7 +137,11 @@ if ! id "$VAULT_USER" >/dev/null 2>&1; then
 	log "creating unprivileged user $VAULT_USER"
 	adduser -D -H -u "$VAULT_UID" -h "$VAULT_DIR" -s /sbin/nologin -g "KivoraDesk credentials" "$VAULT_USER"
 fi
-mkdir -p "$VAULT_DIR" "$KEYS_DIR"
+if ! id "$AUDIT_USER" >/dev/null 2>&1; then
+	log "creating unprivileged user $AUDIT_USER"
+	adduser -D -H -u "$AUDIT_UID" -h "$AUDIT_DIR" -s /sbin/nologin -g "KivoraDesk audit log" "$AUDIT_USER"
+fi
+mkdir -p "$VAULT_DIR" "$KEYS_DIR" "$AUDIT_DIR"
 
 disk=$(data_disk)
 if [ -n "$disk" ]; then
@@ -138,9 +150,11 @@ if [ -n "$disk" ]; then
 		mkfs.ext4 -q -L "$DATA_SERIAL" "$disk"
 	fi
 	mkdir -p "$DATA_DIR"
+	sed -i "s|^LABEL=$DATA_SERIAL $DATA_DIR ext4 defaults,noatime 0 2$|LABEL=$DATA_SERIAL $DATA_DIR ext4 defaults,noatime,nosuid,nodev 0 2|" /etc/fstab
 	grep -q "^LABEL=$DATA_SERIAL " /etc/fstab ||
-		echo "LABEL=$DATA_SERIAL $DATA_DIR ext4 defaults,noatime 0 2" >>/etc/fstab
+		echo "LABEL=$DATA_SERIAL $DATA_DIR ext4 defaults,noatime,nosuid,nodev 0 2" >>/etc/fstab
 	mountpoint -q "$DATA_DIR" || mount "$DATA_DIR"
+	mount -o remount,noatime,nosuid,nodev "$DATA_DIR"
 	if ! mountpoint -q "/home/$AGENT_USER"; then
 		for svc in $SERVICES; do rc-service -q "$svc" stop 2>/dev/null || true; done
 	fi
@@ -149,19 +163,32 @@ if [ -n "$disk" ]; then
 	bind_to_data "$WORKSPACE"
 	bind_to_data "$VAULT_DIR"
 	bind_to_data "$KEYS_DIR"
+	bind_to_data "$AUDIT_DIR"
 else
 	log "no data disk (serial $DATA_SERIAL): keeping data on the system disk"
 fi
 
 # A data disk from an older VM may carry other UIDs.
-for entry in "$AGENT_USER:/home/$AGENT_USER" "$AGENT_USER:$WORKSPACE" "$WORKER_USER:/home/$WORKER_USER" "$VAULT_USER:$VAULT_DIR"; do
+for entry in "$AGENT_USER:/home/$AGENT_USER" "$AGENT_USER:$WORKSPACE" "$WORKER_USER:/home/$WORKER_USER" "$VAULT_USER:$VAULT_DIR" "$AUDIT_USER:$AUDIT_DIR"; do
 	user=${entry%%:*} dir=${entry#*:}
 	if [ -d "$dir" ] && [ "$(stat -c %u "$dir")" != "$(id -u "$user")" ]; then
 		log "fixing ownership of $dir"
 		chown -Rh "$user:$user" "$dir"
 	fi
 done
-chmod 0700 "/home/$AGENT_USER" "/home/$WORKER_USER" "$VAULT_DIR"
+chmod 0700 "/home/$AGENT_USER" "/home/$WORKER_USER" "$VAULT_DIR" "$AUDIT_DIR"
+
+# The audit log used to live in the agent's home, where it could rewrite it.
+old_audit=/home/$AGENT_USER/.local/state/kivora/audit
+if [ -d "$old_audit" ]; then
+	log "moving the audit log to the $AUDIT_USER account"
+	if su -s /bin/sh "$AGENT_USER" -c "cd '$old_audit' && tar -cf - audit-*.jsonl" 2>/dev/null |
+		su -s /bin/sh "$AUDIT_USER" -c "tar -C '$AUDIT_DIR' -xf -" 2>/dev/null; then
+		su -s /bin/sh "$AGENT_USER" -c "rm -rf '$old_audit'"
+	else
+		log "warning: could not move $old_audit: left in place"
+	fi
+fi
 
 # Credentials used to live in the agent's home, where the browser could read
 # them. Each step runs as the account concerned: root must not follow a link
@@ -214,6 +241,8 @@ chmod 0755 /etc/init.d/kivora-* /usr/local/bin/kivora-*
 chmod 0400 /etc/doas.d/*.conf
 chmod 0755 /etc/chromium/policies /etc/chromium/policies/managed
 chmod 0644 /etc/chromium/policies/managed/*.json
+chmod 0644 /etc/sysctl.d/kivoradesk.conf
+sysctl -q -p /etc/sysctl.d/kivoradesk.conf
 doas -C /etc/doas.d/kivora-mcp.conf
 # OpenRC compares its dependency cache with the scripts to the second: a
 # cache rebuilt in the second the scripts were copied looks current without

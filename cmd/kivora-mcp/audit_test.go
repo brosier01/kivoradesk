@@ -1,11 +1,16 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/brosier01/kivoradesk/internal/audit"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 func TestRedact(t *testing.T) {
@@ -35,25 +40,15 @@ func TestRedact(t *testing.T) {
 	}
 }
 
-func TestAuditWritesDailyFilesAndPrunes(t *testing.T) {
+type failingSink struct{}
+
+func (failingSink) Append([]byte) error { return errors.New("disk full") }
+
+func TestAuditRedactsAndStores(t *testing.T) {
 	dir := t.TempDir()
-	old := filepath.Join(dir, "audit-2020-01-01.jsonl")
-	recent := filepath.Join(dir, "audit-"+time.Now().UTC().AddDate(0, 0, -10).Format("2006-01-02")+".jsonl")
-	os.WriteFile(old, []byte("{}\n"), 0o600)
-	os.WriteFile(recent, []byte("{}\n"), 0o600)
-
-	a, err := openAudit(dir, 90*24*time.Hour)
-	if err != nil {
+	a := &auditLog{sink: &audit.Log{Dir: dir, Retention: 48 * time.Hour}}
+	if err := a.record("abcd1234", "shell_run", map[string]string{"command": "export TOKEN=topsecret"}, nil, time.Millisecond); err != nil {
 		t.Fatal(err)
-	}
-	a.record("abcd1234", "shell_run", map[string]string{"command": "export TOKEN=topsecret"}, nil, time.Millisecond)
-	a.Close()
-
-	if _, err := os.Stat(old); err == nil {
-		t.Error("file older than the retention was kept")
-	}
-	if _, err := os.Stat(recent); err != nil {
-		t.Error("recent file was deleted")
 	}
 	today, err := os.ReadFile(filepath.Join(dir, "audit-"+time.Now().UTC().Format("2006-01-02")+".jsonl"))
 	if err != nil {
@@ -61,5 +56,40 @@ func TestAuditWritesDailyFilesAndPrunes(t *testing.T) {
 	}
 	if !strings.Contains(string(today), `"tool":"shell_run"`) || strings.Contains(string(today), "topsecret") {
 		t.Fatalf("today's log = %s", today)
+	}
+}
+
+// A call that could not be logged says so, whether it worked or not.
+func TestToolResultsReportAuditFailures(t *testing.T) {
+	s := &server{audit: &auditLog{sink: failingSink{}}}
+	srv := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
+	add(srv, s, free, &mcp.Tool{Name: "ok", Description: "ok"}, func(context.Context, none) ([]mcp.Content, error) {
+		return text("done"), nil
+	})
+	add(srv, s, free, &mcp.Tool{Name: "bad", Description: "bad"}, func(context.Context, none) ([]mcp.Content, error) {
+		return nil, errors.New("failed")
+	})
+	ct, st := mcp.NewInMemoryTransports()
+	ctx := context.Background()
+	if _, err := srv.Connect(ctx, st, nil); err != nil {
+		t.Fatal(err)
+	}
+	cs, err := mcp.NewClient(&mcp.Implementation{Name: "test"}, nil).Connect(ctx, ct, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cs.Close()
+	for _, name := range []string{"ok", "bad"} {
+		res, err := cs.CallTool(ctx, &mcp.CallToolParams{Name: name})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var b strings.Builder
+		for _, c := range res.Content {
+			b.WriteString(c.(*mcp.TextContent).Text)
+		}
+		if !strings.Contains(b.String(), "not in the audit log") {
+			t.Errorf("%s returned %q", name, b.String())
+		}
 	}
 }

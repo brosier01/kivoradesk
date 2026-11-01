@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/brosier01/kivoradesk/internal/audit"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -35,11 +36,7 @@ func TestScrubberHidesValuesAndEncodings(t *testing.T) {
 
 // Tool results and errors go through the scrubber, whatever the tool.
 func TestToolResultsAreScrubbed(t *testing.T) {
-	audit, err := openAudit(t.TempDir(), time.Hour)
-	if err != nil {
-		t.Fatal(err)
-	}
-	s := &server{audit: audit}
+	s := &server{audit: &auditLog{sink: &audit.Log{Dir: t.TempDir(), Retention: 48 * time.Hour}}}
 	s.filled.remember("pw", "hunter2")
 	srv := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
 	add(srv, s, free, &mcp.Tool{Name: "ok", Description: "ok"}, func(context.Context, none) ([]mcp.Content, error) {

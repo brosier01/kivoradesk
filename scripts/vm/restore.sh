@@ -17,14 +17,18 @@ file=${2:-$(ls -1t "$KIVORA_BACKUP_DIR/$VM_NAME"-data-*.qcow2.gpg 2>/dev/null | 
 [[ -f $KIVORA_BACKUP_PASSPHRASE ]] || die "passphrase file $KIVORA_BACKUP_PASSPHRASE is missing"
 command -v qemu-img >/dev/null || die "qemu-img is required"
 
-work=$(mktemp -d "${TMPDIR:-/tmp}/kivoradesk-restore.XXXXXX")
+# The decrypted disk holds the credentials and the browser's logins: keep it in
+# the private directory, not in /tmp.
+work=$(mktemp -d "$KIVORA_DATA_DIR/restore.XXXXXX")
 trap 'rm -rf "$work"' EXIT
-chmod 700 "$work"
 
 log "decrypting $file"
 gpg --batch --quiet --pinentry-mode loopback --passphrase-file "$KIVORA_BACKUP_PASSPHRASE" \
 	-d -o "$work/data.qcow2" "$file"
-qemu-img check -q "$work/data.qcow2" || die "the backup is not a valid disk image"
+qemu-img check -q -f qcow2 "$work/data.qcow2" || die "the backup is not a valid disk image"
+# A disk naming a backing file would let the VM read a file of this server.
+[[ $(qemu-img info -f qcow2 --output=json "$work/data.qcow2") != *backing-filename* ]] ||
+	die "the backup refers to a backing file: refusing it"
 
 if [[ $(virsh_ domstate "$VM_NAME" 2>/dev/null) == running ]]; then
 	log "backing up the current data first"

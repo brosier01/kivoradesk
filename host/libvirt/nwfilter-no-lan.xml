@@ -45,4 +45,7 @@
   <rule action='drop' direction='out' priority='500'>
     <all state='NEW' dstipaddr='100.64.0.0' dstipmask='10' comment='carrier-grade NAT, Tailscale'/>
   </rule>
+  <rule action='drop' direction='out' priority='500'>
+    <all state='NEW' dstipaddr='224.0.0.0' dstipmask='4' comment='multicast: mDNS, SSDP on the host'/>
+  </rule>
 </filter>

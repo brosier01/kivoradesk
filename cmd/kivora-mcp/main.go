@@ -21,6 +21,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/brosier01/kivoradesk/internal/audit"
 	"github.com/brosier01/kivoradesk/internal/browser"
 	"github.com/brosier01/kivoradesk/internal/cdp"
 	"github.com/brosier01/kivoradesk/internal/control"
@@ -62,7 +63,7 @@ func main() {
 	controlSocket := flag.String("control-socket", "/run/kivora/control.sock", "control API socket of the web gateway")
 	workerCmd := flag.String("worker", "doas -u worker /usr/local/bin/kivora-mcp worker", "command running the worker helper")
 	vaultCmd := flag.String("vault", "doas -u kivora-vault /usr/local/bin/kivora-vault", "command running the credentials helper")
-	auditDays := flag.Int("audit-days", 90, "days of audit log to keep")
+	auditCmd := flag.String("audit", "doas -u kivora-audit /usr/local/bin/kivora-audit record", "command running the audit helper")
 	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
 	if *showVersion {
@@ -75,11 +76,13 @@ func main() {
 		log.Fatal(err)
 	}
 	state := filepath.Join(home, ".local", "state", "kivora")
-	audit, err := openAudit(filepath.Join(state, "audit"), time.Duration(*auditDays)*24*time.Hour)
-	if err != nil {
-		log.Fatal(err)
+	auditClient := &audit.Client{Prefix: strings.Fields(*auditCmd)}
+	defer auditClient.Close()
+	auditing := &auditLog{sink: auditClient}
+	// Do not start without an audit log.
+	if err := auditing.record(newTrace(), "session_start", nil, nil, 0); err != nil {
+		log.Fatalf("audit log: %v", err)
 	}
-	defer audit.Close()
 
 	s := &server{
 		ctl:   control.NewClient(*controlSocket),
@@ -87,7 +90,7 @@ func main() {
 		br:    &browser.Browser{Endpoint: *cdpURL},
 		work:  &worker.Runner{Prefix: strings.Fields(*workerCmd)},
 		vault: &secrets.Client{Prefix: strings.Fields(*vaultCmd)},
-		audit: audit,
+		audit: auditing,
 	}
 	srv := mcp.NewServer(&mcp.Implementation{Name: "kivoradesk", Version: version}, &mcp.ServerOptions{Instructions: instructions})
 	s.register(srv)

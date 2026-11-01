@@ -432,6 +432,7 @@ var scenarios = []scenario{
 			"wget -q -T 3 -O- http://127.0.0.1:9222/json/version >/dev/null 2>&1 && echo LEAK-CDP; " +
 			"wget -q -T 3 -O- http://192.168.1.1/ >/dev/null 2>&1 && echo LEAK-LAN; " +
 			"cat /var/lib/kivora-vault/secrets.json >/dev/null 2>&1 && echo LEAK-VAULT; " +
+			"ls /var/lib/kivora-audit >/dev/null 2>&1 && echo LEAK-AUDIT; " +
 			"nc -z -w2 127.0.0.1 5900 && echo LEAK-VNC; nc -z -w2 127.0.0.1 6080 && echo LEAK-WEB; " +
 			"own=$(ip -4 -o addr show scope global | awk '{split($4, a, \"/\"); print a[1]; exit}'); nc -z -w2 $own 22 && echo LEAK-SSH; " +
 			"ps -o user | grep -qvE 'USER|worker' && echo LEAK-PROC; echo done"})

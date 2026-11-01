@@ -33,18 +33,22 @@ copy_vol=$VM_NAME-data.backup.qcow2
 stamp=$(date -u +%Y%m%dT%H%M%SZ)
 out=$KIVORA_BACKUP_DIR/$VM_NAME-data-$stamp.qcow2.gpg
 
+# The copy of the disk is in clear: never leave it behind, even if a step fails.
+work="" frozen=0
+cleanup() {
+	((frozen)) && virsh_ domfsthaw "$VM_NAME" >/dev/null 2>&1
+	[[ -n $work ]] && rm -rf "$work"
+	rm -f "$out.part"
+	virsh_ vol-delete --pool "$LIBVIRT_POOL" "$copy_vol" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+
 # A copy left by an interrupted run.
 virsh_ pool-refresh "$LIBVIRT_POOL" >/dev/null
 virsh_ vol-delete --pool "$LIBVIRT_POOL" "$copy_vol" >/dev/null 2>&1 || true
 
 if [[ $(virsh_ domstate "$VM_NAME") == running ]]; then
 	work=$(mktemp -d)
-	frozen=0
-	cleanup() {
-		((frozen)) && virsh_ domfsthaw "$VM_NAME" >/dev/null 2>&1
-		rm -rf "$work"
-	}
-	trap cleanup EXIT
 
 	cat >"$work/backup.xml" <<EOF
 <domainbackup mode='push'>
@@ -90,7 +94,6 @@ virsh_ vol-download --pool "$LIBVIRT_POOL" "$source_vol" /dev/stdout |
 		--symmetric --cipher-algo AES256 --compress-level 1 -o "$out.part"
 mv "$out.part" "$out"
 chmod 600 "$out"
-[[ $source_vol == "$copy_vol" ]] && virsh_ vol-delete --pool "$LIBVIRT_POOL" "$copy_vol" >/dev/null
 
 # Keep the most recent backups only.
 mapfile -t old < <(ls -1t "$KIVORA_BACKUP_DIR/$VM_NAME"-data-*.qcow2.gpg | tail -n +$((KIVORA_BACKUP_KEEP + 1)))

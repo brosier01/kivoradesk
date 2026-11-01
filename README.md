@@ -79,7 +79,9 @@ Laptop                              Homelab server (Linux, KVM)
   `computer_type` types ASCII with the keyboard and pastes other characters
   through the clipboard, checking control between chunks.
 - **Audit.** Every call is logged as a JSON line with a trace ID in
-  `/home/agent/.local/state/kivora/audit/audit-YYYY-MM-DD.jsonl`, kept 90 days.
+  `/var/lib/kivora-audit/audit-YYYY-MM-DD.jsonl` on the data disk, kept 90 days,
+  under an account of its own: the agent's side can add entries, not read, change
+  or delete them. A call that could not be logged says so in its result.
   Passwords, tokens and keys are masked in the logged arguments.
 - **Timeouts and recovery.** Every call has a maximum duration. After a
   Chromium crash, browser tools wait for the service to restart it; without
@@ -99,6 +101,8 @@ Laptop                              Homelab server (Linux, KVM)
   Tools refuse to read anything but web pages. `browser_download` and
   `browser_save_pdf` are the way to get files.
 - **Files to the laptop.** Copy them with `scp kivoradesk:/workspace/<path> .`
+  Transfers run as `worker`, in `/workspace`: a link left there cannot lead to the
+  agent's private files. `scp -O`, the old protocol, does not get this protection.
 
 ## Use with Claude Code
 
@@ -148,12 +152,14 @@ minute.
 ## Repository layout
 
 ```text
+cmd/kivora-audit/   audit log writer, run as its own account
 cmd/kivora-bench/   resource and latency benchmark, A/B comparison
 cmd/kivora-mcp/     MCP server (and the worker helper it runs as worker)
 cmd/kivora-probe/   input accuracy probe, runs inside the VM
 cmd/kivora-scenarios/ workflow reliability suite over MCP
 cmd/kivora-vault/   credentials store, run as its own account
 cmd/kivora-web/     web gateway: live view, takeover, input control state
+internal/audit/     audit log files and the client of their writer
 internal/browser/   structured browser tools over CDP
 internal/control/   input owner state (agent, paused, human) and agent API
 internal/desktop/   native mouse, keyboard, screenshots and windows
@@ -171,11 +177,11 @@ host/libvirt/       libvirt network filter isolating the VM
 ## Development VM
 
 Requirements on the host: KVM, libvirt (`qemu:///system`, user in the
-`libvirt` group), `virt-install`, `qemu-img`, `xorriso` and Go. No sudo is
+`libvirt` group), `virt-install`, `qemu-img`, `xorriso`, GnuPG and Go. No sudo is
 needed: disks live in a libvirt-managed storage pool.
 
 ```sh
-scripts/vm/create.sh                    # download Alpine, create the VM, wait for SSH
+scripts/vm/create.sh                    # download Alpine, check its signature, create the VM
 scripts/vm/provision.sh                 # build the gateway, install desktop and services
 scripts/vm/ssh.sh                       # open a shell as the admin user
 scripts/vm/destroy.sh --yes --keep-data # rebuild the system, keep /home/agent and /workspace
@@ -195,6 +201,8 @@ that must stay out of the repository (SSH key, image cache) lives in
 
 Inside the VM:
 
+- The data disk is mounted without setuid programs or device files, and
+  `/etc/sysctl.d/kivoradesk.conf` hardens the kernel for local accounts.
 - The desktop runs as the unprivileged `agent` user on display `:1`
   (1280x800). Only processes holding the agent's X cookie can connect.
 - `/home/agent` and `/workspace` live on a separate data disk mounted at

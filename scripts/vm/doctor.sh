@@ -37,9 +37,12 @@ if ! report=$("$(dirname "$0")/ssh.sh" 'doas sh -s' 2>/dev/null <<'EOF'
 for svc in kivora-hidepid kivora-firewall kivora-display kivora-wm kivora-browser kivora-vnc kivora-web qemu-guest-agent sshd; do
 	if rc-service "$svc" status >/dev/null 2>&1; then echo "ok service $svc"; else echo "fail service $svc is not running"; fi
 done
-for mnt in /data /home/agent /workspace /var/lib/kivora-vault /etc/ssh/authorized_keys; do
+for mnt in /data /home/agent /workspace /var/lib/kivora-vault /var/lib/kivora-audit /etc/ssh/authorized_keys; do
 	mountpoint -q "$mnt" && echo "ok mount $mnt" || echo "fail mount $mnt is not mounted"
 done
+grep -E ' /(workspace|data) ' /proc/mounts | grep -qv 'nosuid.*nodev' && echo "fail data disk mounted with setuid programs or devices" || echo "ok data disk without setuid programs or devices"
+[ "$(sysctl -n fs.protected_regular 2>/dev/null)" = 2 ] && echo "ok kernel settings applied" || echo "fail kernel settings are not applied"
+[ "$(stat -c '%U %a' /var/lib/kivora-audit 2>/dev/null)" = "kivora-audit 700" ] && echo "ok audit log out of the agent's reach" || echo "fail audit log is not private to its account"
 [ "$(stat -c '%U %a' /var/lib/kivora-vault 2>/dev/null)" = "kivora-vault 700" ] && echo "ok credentials private to the vault account" || echo "fail credentials are not private to the vault account"
 [ "$(nft list table inet kivoradesk 2>/dev/null | grep -c 'fib daddr type local')" = 3 ] && echo "ok firewall rules loaded" || echo "fail firewall rules are missing"
 grep -q ' /proc proc .*hidepid' /proc/mounts && echo "ok processes hidden between accounts" || echo "fail processes are not hidden between accounts"
@@ -62,7 +65,7 @@ code=$(wget -S -qO- http://127.0.0.1:6080/ 2>&1 | awk '/HTTP\// { print $2; exit
 v=$(/usr/local/bin/kivora-mcp -version 2>/dev/null) && echo "ok MCP server $v" || echo "fail MCP server does not run"
 pgrep -x xclip >/dev/null && echo "warn a stale xclip owns the clipboard (it blocks the live view input)"
 today=$(date -u +%F)
-log=/home/agent/.local/state/kivora/audit/audit-$today.jsonl
+log=/var/lib/kivora-audit/audit-$today.jsonl
 if [ -f "$log" ]; then
 	echo "ok audit today: $(grep -c . "$log") calls, $(grep -c '"ok":false' "$log") errors"
 fi

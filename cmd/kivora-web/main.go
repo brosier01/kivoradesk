@@ -83,17 +83,9 @@ func run(listen, vncAddr, novnc, stateDir, controlSocket string, log *slog.Logge
 	if err != nil {
 		return err
 	}
-	mux := http.NewServeMux()
-	mux.Handle("GET /{$}", s.page(static))
-	mux.Handle("GET /ui/", s.auth(http.StripPrefix("/ui/", http.FileServerFS(static))))
-	mux.Handle("GET /novnc/", s.auth(http.StripPrefix("/novnc/", http.FileServer(http.Dir(novnc)))))
-	mux.Handle("GET /api/control", s.auth(http.HandlerFunc(s.getControl)))
-	mux.Handle("POST /api/control", s.auth(http.HandlerFunc(s.setControl)))
-	mux.Handle("GET /websockify", s.auth(http.HandlerFunc(s.websockify)))
-
 	srv := &http.Server{
 		Addr:              listen,
-		Handler:           s.checkHost(mux),
+		Handler:           s.routes(static, novnc),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	// The agent's control API: group-accessible socket, so only accounts in
@@ -124,6 +116,44 @@ func run(listen, vncAddr, novnc, stateDir, controlSocket string, log *slog.Logge
 		return err
 	}
 	return nil
+}
+
+func (s *server) routes(static fs.FS, novnc string) http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle("GET /{$}", s.page(static))
+	mux.Handle("GET /ui/", s.auth(http.StripPrefix("/ui/", noListing(http.FileServerFS(static)))))
+	// Only what the viewer loads from noVNC: not its own pages or its tests.
+	novncFiles := s.auth(http.StripPrefix("/novnc/", noListing(http.FileServer(http.Dir(novnc)))))
+	mux.Handle("GET /novnc/core/", novncFiles)
+	mux.Handle("GET /novnc/vendor/", novncFiles)
+	mux.Handle("GET /api/control", s.auth(http.HandlerFunc(s.getControl)))
+	mux.Handle("POST /api/control", s.auth(http.HandlerFunc(s.setControl)))
+	mux.Handle("GET /websockify", s.auth(http.HandlerFunc(s.websockify)))
+	return secureHeaders(s.checkHost(mux))
+}
+
+// noListing refuses directory listings.
+func noListing(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "" || strings.HasSuffix(r.URL.Path, "/") {
+			http.NotFound(w, r)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// secureHeaders applies to every answer: a page of this origin holds the
+// controls of the desktop.
+func secureHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		h.Set("Content-Security-Policy", "default-src 'self'; img-src 'self' data: blob:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
+		h.Set("X-Frame-Options", "DENY")
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("Referrer-Policy", "no-referrer")
+		next.ServeHTTP(w, r)
+	})
 }
 
 // loadToken reads the session token, creating it on first start. The file is
@@ -232,8 +262,6 @@ func (s *server) page(static fs.FS) http.Handler {
 			io.WriteString(w, "Open the URL printed by scripts/vm/web-url.sh to sign in.\n")
 			return
 		}
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; img-src 'self' data: blob:; connect-src 'self'")
-		w.Header().Set("X-Frame-Options", "DENY")
 		http.ServeFileFS(w, r, static, "index.html")
 	})
 }

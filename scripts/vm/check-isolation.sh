@@ -34,6 +34,17 @@ for target in "${targets[@]}"; do
 	fi
 done
 
+# The rest cannot be probed from the VM alone: read it in the filter.
+filter=$(virsh_ nwfilter-dumpxml "$NWFILTER")
+for rule in "clean-traffic:non-IPv4 traffic and address spoofing" "224.0.0.0:multicast"; do
+	if [[ $filter == *"${rule%%:*}"* ]]; then
+		printf '%-8s %s\n' ok "${rule#*:} blocked by the filter"
+	else
+		printf '%-8s %s\n' FAIL "${rule#*:} not blocked: run scripts/vm/update.sh"
+		failed=1
+	fi
+done
+
 if "$(dirname "$0")/ssh.sh" 'nslookup example.com >/dev/null && curl -fsS -o /dev/null -m 10 https://example.com'; then
 	printf '%-8s %s\n' ok "Internet (DNS + HTTPS) reachable"
 else
