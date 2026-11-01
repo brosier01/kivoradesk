@@ -567,15 +567,10 @@ var scenarios = []scenario{
 		return contains(out, "example.com")
 	}},
 	{name: "internet_loss", host: true, run: func(r *runner) error {
-		route, err := r.script("", "ssh.sh", "ip route show default")
-		if err != nil {
-			return err
-		}
-		route = strings.TrimSpace(route)
-		if !strings.HasPrefix(route, "default via ") {
-			return fmt.Errorf("unexpected default route %q", route)
-		}
-		if _, err := r.script("", "ssh.sh", "doas ip route del default"); err != nil {
+		// A temporary firewall table rejects everything leaving the libvirt
+		// network: the Internet is gone, the server's SSH link stays up, and
+		// no DHCP renewal can undo it.
+		if _, err := r.script("", "ssh.sh", cutInternet); err != nil {
 			return err
 		}
 		restored := false
@@ -584,7 +579,7 @@ var scenarios = []scenario{
 				return nil
 			}
 			restored = true
-			_, err := r.script("", "ssh.sh", "doas ip route replace "+route)
+			_, err := r.script("", "ssh.sh", restoreInternet)
 			return err
 		}
 		defer restore()
@@ -592,8 +587,10 @@ var scenarios = []scenario{
 		if err != nil {
 			return err
 		}
-		if err := contains(out, "net::ERR_"); err != nil {
-			return err
+		// Chromium either fails at once or, when it reuses an open connection,
+		// waits until the navigation timeout: both are explicit errors.
+		if !strings.Contains(out, "net::ERR_") && !strings.Contains(out, "timed out") {
+			return fmt.Errorf("no explicit network error: %s", oneLine(out))
 		}
 		if err := restore(); err != nil {
 			return err
@@ -602,3 +599,16 @@ var scenarios = []scenario{
 		return err
 	}},
 }
+
+const (
+	cutInternet = `doas nft -f - <<'EOF'
+table inet kivoradesk_fault {
+	chain output {
+		type filter hook output priority filter; policy accept;
+		oifname "lo" accept
+		ip daddr != 192.168.122.0/24 reject
+	}
+}
+EOF`
+	restoreInternet = "doas nft delete table inet kivoradesk_fault"
+)
