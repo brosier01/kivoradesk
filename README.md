@@ -8,9 +8,10 @@ KivoraDesk runs an Alpine Linux VM on your own server (QEMU/KVM + libvirt).
 Claude Code stays on your laptop and drives the VM through an MCP server reached
 over SSH. You can watch the desktop live and take over at any time.
 
-> **Status:** early development. Phases 0 to 2 are done: Claude Code on a
+> **Status:** early development. Phases 0 to 3 are done: Claude Code on a
 > laptop drives the VM through the MCP server (web research, forms, PDFs,
-> shell, files) while the human watches and can take over.
+> shell, files, credentials) while the human watches and can take over, with
+> backups, recovery and a 30-scenario reliability suite at 100 %.
 
 ## How it works
 
@@ -113,7 +114,7 @@ Resources: about 313 MiB RAM used at idle, 490 MiB with three real sites open,
 | 0 | Feasibility: KVM, Alpine, Chromium, CDP, native input | Done |
 | 1 | Live view from the laptop, human takeover, SSH access path, data disk, network isolation | Done |
 | 2 | MCP server: `computer`, `browser`, `shell`, `files`, `human`; agent/human lock; worker account | Done |
-| 3 | Robustness: fault recovery, timeouts, diagnostics, update/recover/reset, encrypted backups, audit retention, credentials, mobile view, network allowlist | In progress: scenario suite left |
+| 3 | Robustness: fault recovery, timeouts, diagnostics, update/recover/reset, encrypted backups, audit retention, credentials, mobile view, network allowlist, scenario suite | Done |
 | 4 | Optimisation and published benchmarks | Planned |
 | 5 | Installation guide and first release | Planned |
 
@@ -122,6 +123,7 @@ Resources: about 313 MiB RAM used at idle, 490 MiB with three real sites open,
 ```text
 cmd/kivora-mcp/     MCP server (and the worker helper it runs as worker)
 cmd/kivora-probe/   input accuracy probe, runs inside the VM
+cmd/kivora-scenarios/ workflow reliability suite over MCP
 cmd/kivora-web/     web gateway: live view, takeover, input control state
 internal/browser/   structured browser tools over CDP
 internal/control/   input owner state (agent, paused, human) and agent API
@@ -241,6 +243,34 @@ open "http://localhost:6080/?token=…"   # the URL from web-url.sh, once
 
 The token is stored in a strict same-site cookie. The gateway also rejects
 non-loopback `Host` headers and cross-origin control requests.
+
+## Scenario suite
+
+`kivora-scenarios` measures how reliably complete workflows run (PRD target:
+at least 90 % over 30 scenarios). It drives the real MCP server over SSH with
+scripted tool sequences, so it measures the computer, not a model's
+reasoning:
+
+| Area | Scenarios |
+|---|---|
+| Web | search, read a long page and a truncated one, follow links, back/forward/reload, tabs, slow page, redirects, navigate with the keyboard |
+| Forms and typing | fill and submit a form, Unicode through CDP and through the keyboard, site search box |
+| Files from the web | PDF, binary download, download with the browser's cookies, download then process in the shell |
+| Desktop | screenshot and scroll, windows and focus |
+| Shell and files | pipeline, files round trip, timeout, worker isolation |
+| Human control | input lock, takeover request |
+| Persistence and faults | login kept across a browser restart, credentials, Chromium crash, Internet loss |
+
+```sh
+go build -o bin/kivora-scenarios ./cmd/kivora-scenarios
+bin/kivora-scenarios -mcp "ssh -i $KEY -T agent@192.168.122.50 /usr/local/bin/kivora-mcp" \
+  -token "$(scripts/vm/ssh.sh 'doas cat /var/lib/kivora-web/token')" \
+  -scripts "$PWD/scripts/vm" -runs 10
+```
+
+Result on 2026-11-01 (Alpine 3.24, Chromium 155, 2 vCPU, 4 GiB): **300/300
+runs passed (100 %)**, 10 runs per scenario. Without Internet, navigation
+fails with an explicit error, at once or after its 45-second timeout.
 
 ## Tests
 
