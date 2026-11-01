@@ -1,5 +1,9 @@
 # KivoraDesk
 
+<p align="center">
+  <img src="docs/assets/kivo.png" width="256" alt="Kivo, the KivoraDesk marmot, browsing the web from a desk in its burrow">
+</p>
+
 A self-hosted, persistent and isolated Linux computer that an AI agent can use
 like a person does: look at the screen, move the mouse, type, browse the web,
 run commands and keep files.
@@ -340,3 +344,6 @@ their own authorized account.
 ## License
 
 Apache-2.0 — see [LICENSE](LICENSE).
+
+Kivo, the marmot in `docs/assets/`, is the project mascot and is covered by
+the same license.
