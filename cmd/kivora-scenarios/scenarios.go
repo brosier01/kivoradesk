@@ -435,7 +435,10 @@ var scenarios = []scenario{
 			"ls /var/lib/kivora-audit >/dev/null 2>&1 && echo LEAK-AUDIT; " +
 			"nc -z -w2 127.0.0.1 5900 && echo LEAK-VNC; nc -z -w2 127.0.0.1 6080 && echo LEAK-WEB; " +
 			"own=$(ip -4 -o addr show scope global | awk '{split($4, a, \"/\"); print a[1]; exit}'); nc -z -w2 $own 22 && echo LEAK-SSH; " +
-			"ps -o user | grep -qvE 'USER|worker' && echo LEAK-PROC; echo done"})
+			"ps -o user | grep -qvE 'USER|worker' && echo LEAK-PROC; " +
+			"curl -s -m 5 --noproxy '*' -o /dev/null https://example.com && echo LEAK-NET; " +
+			"nslookup example.com >/dev/null 2>&1 && echo LEAK-DNS; " +
+			"curl -s -m 5 -o /dev/null https://example.com && echo LEAK-PROXY; echo done"})
 		if err != nil {
 			return err
 		}

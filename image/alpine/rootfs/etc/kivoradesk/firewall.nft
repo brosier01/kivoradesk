@@ -1,8 +1,9 @@
 # KivoraDesk local firewall, loaded by the kivora-firewall service.
 #
-# The worker account runs the agent's shell commands. Keep it away from every
-# service of the VM, on loopback or on its own address (sshd), and each local
-# service that controls the desktop reserved to the accounts that need it.
+# The worker account runs the agent's shell commands. Its only way out is the
+# proxy, which lets it reach the sites the human allowed: no other service of the
+# VM, nothing on the network, no DNS. Each local service that controls the desktop
+# is reserved to the accounts that need it.
 
 table inet kivoradesk
 delete table inet kivoradesk
@@ -10,7 +11,10 @@ delete table inet kivoradesk
 table inet kivoradesk {
 	chain output {
 		type filter hook output priority filter; policy accept;
-		meta skuid "worker" fib daddr type local reject
+		meta skuid "worker" ip daddr 127.0.0.1 tcp dport 3128 accept
+		meta skuid "worker" reject
+		# The proxy is for the worker: others need no list to go out.
+		meta skuid != "worker" tcp dport 3128 fib daddr type local reject
 		# VNC has no password: only the gateway may connect, which also keeps
 		# web pages in the browser away from it.
 		meta skuid != "kivora-web" tcp dport 5900 fib daddr type local reject

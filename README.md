@@ -71,6 +71,11 @@ Laptop                              Homelab server (Linux, KVM)
 - **Browser tools.** Their scripts run in an isolated world: a page cannot change
   what they read, pretend to be the visible tab or move the numbers of its
   elements. `browser_download` refuses the addresses of the VM itself.
+- **Shell network.** Shell commands have no network of their own, not even DNS.
+  Their only way out is a proxy reaching, over HTTPS, the sites you allow with
+  `scripts/vm/shell-allow.sh`, and none at first. It logs what it opens and refuses
+  in `/var/log/kivora-proxy.log`. `browser_download` is how files get in. The browser
+  is not limited: the agent can still send to a site what it reads elsewhere.
 - **Shell limits.** Nothing `shell_run` starts outlives the call, even detached
   (each call has its own PID namespace, which needs unprivileged user namespaces).
   512 processes, 3 GiB per process and 8 GiB per file at most, low priority, and
@@ -156,6 +161,7 @@ cmd/kivora-audit/   audit log writer, run as its own account
 cmd/kivora-bench/   resource and latency benchmark, A/B comparison
 cmd/kivora-mcp/     MCP server (and the worker helper it runs as worker)
 cmd/kivora-probe/   input accuracy probe, runs inside the VM
+cmd/kivora-proxy/   the only way out for shell commands, to the allowed sites
 cmd/kivora-scenarios/ workflow reliability suite over MCP
 cmd/kivora-vault/   credentials store, run as its own account
 cmd/kivora-web/     web gateway: live view, takeover, input control state
@@ -166,6 +172,7 @@ internal/desktop/   native mouse, keyboard, screenshots and windows
 internal/secrets/   credentials bound to sites and kinds of field
 internal/worker/    shell commands and file operations as the worker
 internal/workspace/ symlink-safe writes into /workspace
+internal/netguard/  refuses connections to this computer's own services
 internal/rfb/       VNC client-message filter used by the gateway
 internal/cdp/       minimal Chrome DevTools Protocol client
 image/cloud-init/   first-boot configuration (admin user, SSH key)
@@ -189,6 +196,7 @@ scripts/vm/destroy.sh --yes             # delete the VM and all its data
 scripts/vm/check-isolation.sh           # VM reaches the Internet, not private networks
 scripts/vm/doctor.sh                    # diagnose the VM, its services and the MCP server
 scripts/vm/allow.sh add 192.168.1.20:8080 staging   # let the VM reach one private service
+scripts/vm/shell-allow.sh add pypi.org              # let shell commands reach one site
 ```
 
 Settings (VM name, sizes, fixed IP, Alpine release, libvirt pool) can be

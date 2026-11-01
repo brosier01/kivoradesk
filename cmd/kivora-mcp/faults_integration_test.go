@@ -309,3 +309,38 @@ func TestAuditLogRecordsCalls(t *testing.T) {
 		t.Fatalf("the call is not in the audit log: %q", count)
 	}
 }
+
+// TestShellReachesOnlyAllowedSites checks the only way out of the worker: nothing
+// directly, not even DNS, and through the proxy only the sites on the list.
+func TestShellReachesOnlyAllowedSites(t *testing.T) {
+	e := setupHost(t)
+	status := func(command string) string {
+		t.Helper()
+		out, _ := e.call("shell_run", map[string]any{"command": command + " >/dev/null 2>&1; echo status=$?"}, false)
+		return regexp.MustCompile(`status=(\d+)`).FindStringSubmatch(out)[1]
+	}
+	if status("curl -sS -m 5 --noproxy '*' https://example.com") == "0" {
+		t.Error("the worker goes out without the proxy")
+	}
+	if status("nslookup example.com") == "0" {
+		t.Error("the worker resolves names: DNS can carry data out")
+	}
+	if status("curl -fsS -m 10 https://example.com") == "0" {
+		t.Error("the proxy lets through a site that is not on the list")
+	}
+	if status("curl -fsS -m 10 http://example.com") == "0" {
+		t.Error("the proxy lets plain HTTP through")
+	}
+
+	script(t, "", "shell-allow.sh", "add", "example.com")
+	t.Cleanup(func() { script(t, "", "shell-allow.sh", "remove", "example.com") })
+	if status("curl -fsS -m 15 https://example.com") != "0" {
+		t.Error("an allowed site is not reachable")
+	}
+	if status("curl -fsS -m 10 https://example.org") == "0" {
+		t.Error("the proxy lets through another site")
+	}
+	if status("curl -sS -m 5 --noproxy '*' https://example.com") == "0" {
+		t.Error("an allowed site is reachable without the proxy")
+	}
+}

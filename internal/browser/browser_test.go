@@ -57,16 +57,4 @@ func TestDownloadsNeverReachThisComputer(t *testing.T) {
 			t.Errorf("%s: %v", u, err)
 		}
 	}
-
-	// The check also applies when a redirect leads here. The redirect itself
-	// comes from outside in real use: only the dial differs.
-	for ip, want := range map[string]bool{
-		"127.0.0.1": true, "127.8.8.8": true, "::1": true, "0.0.0.0": true, "::": true,
-		"169.254.169.254": true, "fe80::1": true, "224.0.0.1": true,
-		"8.8.8.8": false, "2606:4700:4700::1111": false, "192.168.1.20": false,
-	} {
-		if got := isLocalIP(net.ParseIP(ip)); got != want {
-			t.Errorf("isLocalIP(%s) = %v, want %v", ip, got, want)
-		}
-	}
 }
