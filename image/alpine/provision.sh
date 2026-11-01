@@ -21,6 +21,8 @@ WEB_USER=${WEB_USER:-kivora-web}
 VAULT_USER=${VAULT_USER:-kivora-vault}
 VAULT_UID=${VAULT_UID:-1102}
 VAULT_DIR=/var/lib/kivora-vault
+# The agent's SSH keys, on the data disk but out of its reach.
+KEYS_DIR=/etc/ssh/authorized_keys
 WORKSPACE=${WORKSPACE:-/workspace}
 DATA_DIR=/data
 DATA_SERIAL=kivora-data
@@ -127,7 +129,7 @@ if ! id "$VAULT_USER" >/dev/null 2>&1; then
 	log "creating unprivileged user $VAULT_USER"
 	adduser -D -H -u "$VAULT_UID" -h "$VAULT_DIR" -s /sbin/nologin -g "KivoraDesk credentials" "$VAULT_USER"
 fi
-mkdir -p "$VAULT_DIR"
+mkdir -p "$VAULT_DIR" "$KEYS_DIR"
 
 disk=$(data_disk)
 if [ -n "$disk" ]; then
@@ -146,6 +148,7 @@ if [ -n "$disk" ]; then
 	bind_to_data "/home/$WORKER_USER"
 	bind_to_data "$WORKSPACE"
 	bind_to_data "$VAULT_DIR"
+	bind_to_data "$KEYS_DIR"
 else
 	log "no data disk (serial $DATA_SERIAL): keeping data on the system disk"
 fi
@@ -175,6 +178,27 @@ if [ -e "$old_vault" ] || [ -L "$old_vault" ]; then
 	unset creds
 	su -s /bin/sh "$AGENT_USER" -c "rm -f '$old_vault'"
 fi
+
+# SSH keys used to live in the agent's home, where anything running as the
+# agent could add one. As for the credentials, the old file is read as the agent.
+chown root:root "$KEYS_DIR"
+chmod 0755 "$KEYS_DIR"
+old_keys=/home/$AGENT_USER/.ssh/authorized_keys
+new_keys=$KEYS_DIR/$AGENT_USER
+if [ -e "$old_keys" ] || [ -L "$old_keys" ]; then
+	log "moving the SSH keys of $AGENT_USER to $KEYS_DIR"
+	keys=$(su -s /bin/sh "$AGENT_USER" -c "cat '$old_keys'" 2>/dev/null) || keys=
+	if [ -s "$new_keys" ]; then
+		log "warning: $new_keys already holds keys: deleting $old_keys without merging it"
+	elif [ -n "$keys" ]; then
+		printf '%s\n' "$keys" >"$new_keys"
+	fi
+	unset keys
+	su -s /bin/sh "$AGENT_USER" -c "rm -f '$old_keys'"
+fi
+[ -e "$new_keys" ] || : >"$new_keys"
+chown "root:$AGENT_USER" "$new_keys"
+chmod 0640 "$new_keys"
 
 log "preparing $WORKSPACE"
 mkdir -p "$WORKSPACE"

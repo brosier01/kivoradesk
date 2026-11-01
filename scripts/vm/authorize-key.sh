@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Allow an SSH public key to log in to the VM as the agent user, for example
-# the laptop's key. The key is stored on the data disk and survives rebuilds.
+# the laptop's key. The key is stored on the data disk and survives rebuilds,
+# in a file the agent account can read but not change.
 set -euo pipefail
 source "$(dirname "$0")/common.sh"
 
@@ -10,12 +11,11 @@ key=$(head -n1 "$1")
 
 printf '%s\n' "$key" | "$(dirname "$0")/ssh.sh" "doas sh -c '
 	set -e
-	dir=/home/$VM_AGENT/.ssh
-	install -d -m 700 -o $VM_AGENT -g $VM_AGENT \$dir
-	touch \$dir/authorized_keys
+	keys=/etc/ssh/authorized_keys/$VM_AGENT
+	touch \$keys
 	read -r key
-	grep -qxF \"\$key\" \$dir/authorized_keys || printf \"%s\n\" \"\$key\" >>\$dir/authorized_keys
-	chown $VM_AGENT:$VM_AGENT \$dir/authorized_keys
-	chmod 600 \$dir/authorized_keys
+	grep -qxF \"\$key\" \$keys || printf \"%s\n\" \"\$key\" >>\$keys
+	chown root:$VM_AGENT \$keys
+	chmod 640 \$keys
 '"
 log "key authorized for $VM_AGENT@$VM_NAME"
