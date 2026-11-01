@@ -74,11 +74,19 @@ Laptop                              Homelab server (Linux, KVM)
   Chromium crash, browser tools wait for the service to restart it; without
   Internet they fail at once with the browser's network error.
 - **Credentials.** The human stores credentials with `scripts/vm/secret.sh`,
-  each bound to the sites where it may be used. The agent sees names and sites
-  only; `secrets_fill` checks the page origin and fills the field in one step,
-  and masks it on screen. Password fields and filled fields are never returned
-  by `browser_read_page`. Once logged in, the agent can still read what the
-  site itself displays.
+  each bound to the sites where it may be used and to a kind of field. They live
+  under a separate account that the browser cannot read. The agent sees names,
+  sites and field kinds only; `secrets_fill` checks the page origin and the field
+  and fills it in one step, and keeps it masked on screen. Filled values are
+  removed from the text of every tool result. Screenshots cannot be cleaned: a
+  site that displays a value it received shows it on screen. Once logged in, the
+  agent can still read what the site itself displays.
+- **Browser lockdown.** Chromium policies block local files, browser pages,
+  the developer tools, extensions, file dialogs, downloads from the browser and
+  its password manager, for the agent and for the human during a takeover. To
+  change them, edit `/etc/chromium/policies/managed/kivora.json` in the VM.
+  Tools refuse to read anything but web pages. `browser_download` and
+  `browser_save_pdf` are the way to get files.
 - **Files to the laptop.** Copy them with `scp kivoradesk:/workspace/<path> .`
 
 ## Use with Claude Code
@@ -133,10 +141,12 @@ cmd/kivora-bench/   resource and latency benchmark, A/B comparison
 cmd/kivora-mcp/     MCP server (and the worker helper it runs as worker)
 cmd/kivora-probe/   input accuracy probe, runs inside the VM
 cmd/kivora-scenarios/ workflow reliability suite over MCP
+cmd/kivora-vault/   credentials store, run as its own account
 cmd/kivora-web/     web gateway: live view, takeover, input control state
 internal/browser/   structured browser tools over CDP
 internal/control/   input owner state (agent, paused, human) and agent API
 internal/desktop/   native mouse, keyboard, screenshots and windows
+internal/secrets/   credentials bound to sites and kinds of field
 internal/worker/    shell commands and file operations as the worker
 internal/workspace/ symlink-safe writes into /workspace
 internal/rfb/       VNC client-message filter used by the gateway
@@ -178,6 +188,9 @@ Inside the VM:
   `/data`, so rebuilding the system disk keeps files and browser logins.
 - Services are supervised by OpenRC: `kivora-display`, `kivora-wm`,
   `kivora-browser`, `kivora-vnc` and `kivora-web`.
+- Chromium runs with `--disable-gpu-shader-disk-cache`: on Alpine, the GPU
+  process's sandbox refuses the system call that writes this cache, and a new
+  profile then crashes the browser.
 - Chromium DevTools (9222), VNC (5900) and the web gateway (6080) listen on
   localhost only. Over SSH, the `agent` account may only forward to 6080.
 
@@ -220,12 +233,22 @@ without it, backups cannot be restored.
 
 ```sh
 scripts/vm/secret.sh set github-password https://github.com   # prompts for the value
-scripts/vm/secret.sh list                                     # names and sites
+scripts/vm/secret.sh set --field text github-login https://github.com
+scripts/vm/secret.sh list                                     # names, sites, field kinds
 scripts/vm/secret.sh delete github-password
 ```
 
-Values are stored in the VM, readable only by the desktop account, and
-included in the encrypted backups of the data disk.
+A credential goes into password fields only. With `--field text`, it also goes
+into login, email and one-time code fields, which sites may display: keep that
+for values that are not really secret, such as a login name. Credentials stored
+by an older version count as password credentials: store a login name again with
+`--field text`.
+
+Values are stored in clear in the VM, on the data disk, readable only by the
+`kivora-vault` account, and included in the encrypted backups of the data disk.
+The MCP server asks that account for one value at a time, for the page it is
+about to fill. This keeps them from the model and the browser's pages, not from
+code running as the desktop account, which could ask for them too.
 
 ## Live view from the laptop
 
