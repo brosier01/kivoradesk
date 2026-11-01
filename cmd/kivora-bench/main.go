@@ -359,7 +359,9 @@ func measureLoaded(c *client, f benchFlags) (memory, error) {
 	var tabs []struct {
 		ID string `json:"id"`
 	}
-	json.Unmarshal([]byte(out), &tabs)
+	if start, end := strings.Index(out, "["), strings.LastIndex(out, "]"); start >= 0 && end > start {
+		json.Unmarshal([]byte(out[start:end+1]), &tabs) // inside the untrusted wrapper
+	}
 	for i, t := range tabs {
 		if i > 0 {
 			c.call("browser_close_tab", map[string]any{"id": t.ID})

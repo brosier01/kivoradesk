@@ -149,7 +149,7 @@ func (r *runner) reset() error {
 		ID     string `json:"id"`
 		Active bool   `json:"active"`
 	}
-	if err := json.Unmarshal([]byte(out), &tabs); err != nil {
+	if err := json.Unmarshal([]byte(jsonList(out)), &tabs); err != nil {
 		return err
 	}
 	for i, t := range tabs {
@@ -271,6 +271,15 @@ func path(out, ext string) (string, error) {
 		return "", fmt.Errorf("no %s path in %q", ext, oneLine(out))
 	}
 	return m[1], nil
+}
+
+// jsonList extracts the JSON array of a tool result, from its untrusted wrapper.
+func jsonList(out string) string {
+	start, end := strings.Index(out, "["), strings.LastIndex(out, "]")
+	if start < 0 || end < start {
+		return out
+	}
+	return out[start : end+1]
 }
 
 func oneLine(s string) string { return strings.Join(strings.Fields(s), " ") }
