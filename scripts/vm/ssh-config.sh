@@ -20,7 +20,7 @@ Host $VM_NAME-host
     User $host_user
 
 # KivoraDesk VM. "ssh -N $VM_NAME" opens the live view tunnel on
-# http://localhost:$WEB_PORT (sign in with the URL from scripts/vm/web-url.sh).
+# http://kivora.localhost:$WEB_PORT (sign in with the URL from scripts/vm/web-url.sh).
 Host $VM_NAME
     HostName $VM_IP
     User $VM_AGENT

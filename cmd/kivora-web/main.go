@@ -2,17 +2,20 @@
 // the input control state (agent, paused or human).
 //
 // It listens on localhost inside the VM; the human reaches it through an SSH
-// tunnel. Every request must carry the session token, set as a cookie from
-// the one-time URL printed by scripts/vm/web-url.sh. Viewer input is relayed
-// to the VNC server only while the human owns the desktop.
+// tunnel. Every request must carry a session, set as a cookie by the one-time
+// URL printed by scripts/vm/web-url.sh. Viewer input is relayed to the VNC
+// server only while the human owns the desktop.
+//
+// Run as its account, it also manages sign-in, without the gateway restarting:
+//
+//	kivora-web login-code   print a sign-in code: works once, for 5 minutes
+//	kivora-web session      print a new session, for tests
+//	kivora-web sign-out     end every session
 package main
 
 import (
 	"context"
-	"crypto/rand"
-	"crypto/subtle"
 	"embed"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -40,18 +43,27 @@ var webFS embed.FS
 
 const cookieName = "kivora_session"
 
+const defaultStateDir = "/var/lib/kivora-web"
+
 type server struct {
-	token   string
-	vncAddr string
-	state   *control.State
-	log     *slog.Logger
+	sessions *sessionStore
+	vncAddr  string
+	state    *control.State
+	log      *slog.Logger
 }
 
 func main() {
+	if len(os.Args) > 1 && !strings.HasPrefix(os.Args[1], "-") {
+		if err := admin(&sessionStore{dir: defaultStateDir}, os.Args[1:]); err != nil {
+			fmt.Fprintln(os.Stderr, "kivora-web:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	listen := flag.String("listen", "127.0.0.1:6080", "address to listen on")
 	vncAddr := flag.String("vnc", "127.0.0.1:5900", "VNC server address")
 	novnc := flag.String("novnc", "/usr/share/novnc", "directory holding the noVNC client")
-	stateDir := flag.String("state-dir", "/var/lib/kivora-web", "directory for the session token")
+	stateDir := flag.String("state-dir", defaultStateDir, "directory for sessions and the control state")
 	controlSocket := flag.String("control-socket", "/run/kivora/control.sock", "Unix socket serving the agent's control API")
 	flag.Parse()
 
@@ -62,13 +74,37 @@ func main() {
 	}
 }
 
-func run(listen, vncAddr, novnc, stateDir, controlSocket string, log *slog.Logger) error {
-	token, err := loadToken(filepath.Join(stateDir, "token"))
+// admin runs the commands managing sign-in.
+func admin(sessions *sessionStore, args []string) error {
+	if len(args) != 1 {
+		return errors.New("usage: kivora-web login-code | session | sign-out")
+	}
+	var kind string
+	switch args[0] {
+	case "login-code":
+		kind = codesDir
+	case "session":
+		kind = sessionsDir
+	case "sign-out":
+		return sessions.signOutAll()
+	default:
+		return fmt.Errorf("unknown command %q", args[0])
+	}
+	secret, err := sessions.issue(kind)
 	if err != nil {
 		return err
 	}
+	fmt.Println(secret)
+	return nil
+}
+
+func run(listen, vncAddr, novnc, stateDir, controlSocket string, log *slog.Logger) error {
+	// The permanent token of older versions must stop working.
+	os.Remove(filepath.Join(stateDir, "token"))
+	sessions := &sessionStore{dir: stateDir}
+	sessions.prune()
 	controlFile := filepath.Join(stateDir, "control.json")
-	s := &server{token: token, vncAddr: vncAddr, state: loadControl(controlFile, log), log: log}
+	s := &server{sessions: sessions, vncAddr: vncAddr, state: loadControl(controlFile, log), log: log}
 	var saving sync.Mutex
 	s.state.OnChange(func(control.Snapshot) {
 		// The latest state, whatever the order of concurrent changes.
@@ -121,6 +157,7 @@ func run(listen, vncAddr, novnc, stateDir, controlSocket string, log *slog.Logge
 func (s *server) routes(static fs.FS, novnc string) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("GET /{$}", s.page(static))
+	mux.HandleFunc("GET /login", s.login)
 	mux.Handle("GET /ui/", s.auth(http.StripPrefix("/ui/", noListing(http.FileServerFS(static)))))
 	// Only what the viewer loads from noVNC: not its own pages or its tests.
 	novncFiles := s.auth(http.StripPrefix("/novnc/", noListing(http.FileServer(http.Dir(novnc)))))
@@ -156,27 +193,6 @@ func secureHeaders(next http.Handler) http.Handler {
 	})
 }
 
-// loadToken reads the session token, creating it on first start. The file is
-// only readable by the gateway user, so desktop processes cannot take control.
-func loadToken(path string) (string, error) {
-	b, err := os.ReadFile(path)
-	if err == nil {
-		return strings.TrimSpace(string(b)), nil
-	}
-	if !errors.Is(err, os.ErrNotExist) {
-		return "", err
-	}
-	buf := make([]byte, 32)
-	if _, err := rand.Read(buf); err != nil {
-		return "", err
-	}
-	token := hex.EncodeToString(buf)
-	if err := os.WriteFile(path, []byte(token+"\n"), 0o600); err != nil {
-		return "", fmt.Errorf("write token: %w", err)
-	}
-	return token, nil
-}
-
 // loadControl resumes the input control state of the previous run, so that a
 // restart never hands the desktop to the agent behind the human's back. On the
 // very first start the agent owns the desktop; if the saved state cannot be
@@ -210,14 +226,15 @@ func saveControl(path string, snap control.Snapshot) error {
 }
 
 // checkHost rejects requests whose Host is not a loopback name, which defeats
-// DNS rebinding through the SSH tunnel.
+// DNS rebinding through the SSH tunnel. kivora.localhost is the name to use: a
+// cookie set on localhost also goes to every other service of the laptop on it.
 func (s *server) checkHost(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		host, _, err := net.SplitHostPort(r.Host)
 		if err != nil {
 			host = r.Host
 		}
-		if host != "localhost" && host != "127.0.0.1" && host != "[::1]" && host != "::1" {
+		if host != "kivora.localhost" && host != "localhost" && host != "127.0.0.1" && host != "[::1]" && host != "::1" {
 			http.Error(w, "forbidden host", http.StatusForbidden)
 			return
 		}
@@ -227,7 +244,7 @@ func (s *server) checkHost(next http.Handler) http.Handler {
 
 func (s *server) authorized(r *http.Request) bool {
 	c, err := r.Cookie(cookieName)
-	return err == nil && subtle.ConstantTimeCompare([]byte(c.Value), []byte(s.token)) == 1
+	return err == nil && s.sessions.valid(c.Value)
 }
 
 func (s *server) auth(next http.Handler) http.Handler {
@@ -240,23 +257,36 @@ func (s *server) auth(next http.Handler) http.Handler {
 	})
 }
 
-// page serves the viewer. Opening /?token=... once stores the token in a
-// strict same-site cookie and redirects to a clean URL.
+// login trades a sign-in code for a session, in a strict same-site cookie, and
+// redirects to a clean URL.
+func (s *server) login(w http.ResponseWriter, r *http.Request) {
+	if s.authorized(r) {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
+	if !s.sessions.redeem(r.URL.Query().Get("code")) {
+		w.WriteHeader(http.StatusUnauthorized)
+		io.WriteString(w, "This sign-in link is invalid, expired or already used. Get a new one with scripts/vm/web-url.sh.\n")
+		return
+	}
+	session, err := s.sessions.issue(sessionsDir)
+	if err != nil {
+		s.log.Error("create a session", "err", err)
+		http.Error(w, "could not create a session", http.StatusInternalServerError)
+		return
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name: cookieName, Value: session, Path: "/",
+		HttpOnly: true, SameSite: http.SameSiteStrictMode,
+		MaxAge: int(sessionTTL.Seconds()),
+	})
+	s.log.Info("signed in", "remote", r.RemoteAddr)
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+// page serves the viewer.
 func (s *server) page(static fs.FS) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if t := r.URL.Query().Get("token"); t != "" {
-			if subtle.ConstantTimeCompare([]byte(t), []byte(s.token)) != 1 {
-				http.Error(w, "invalid token", http.StatusUnauthorized)
-				return
-			}
-			http.SetCookie(w, &http.Cookie{
-				Name: cookieName, Value: s.token, Path: "/",
-				HttpOnly: true, SameSite: http.SameSiteStrictMode,
-				MaxAge: int((30 * 24 * time.Hour).Seconds()),
-			})
-			http.Redirect(w, r, "/", http.StatusSeeOther)
-			return
-		}
 		if !s.authorized(r) {
 			w.WriteHeader(http.StatusUnauthorized)
 			io.WriteString(w, "Open the URL printed by scripts/vm/web-url.sh to sign in.\n")

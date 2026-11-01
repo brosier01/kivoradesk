@@ -55,7 +55,7 @@ type result struct {
 func main() {
 	mcpCmd := flag.String("mcp", "", "command starting the MCP server (over SSH)")
 	web := flag.String("web", "http://localhost:6080", "web gateway URL (through the tunnel)")
-	token := flag.String("token", os.Getenv("KIVORA_WEB_TOKEN"), "web gateway token")
+	token := flag.String("token", os.Getenv("KIVORA_WEB_TOKEN"), "web gateway session (kivora-web session)")
 	scripts := flag.String("scripts", "", "directory of the server's admin scripts (enables host scenarios)")
 	runs := flag.Int("runs", 3, "runs per scenario")
 	only := flag.String("only", "", "run scenarios whose name matches this regexp")
