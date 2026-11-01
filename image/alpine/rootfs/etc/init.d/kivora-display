@@ -13,6 +13,9 @@ command=/usr/bin/Xvfb
 command_args="$KIVORA_DISPLAY -screen 0 $KIVORA_SCREEN -nolisten tcp -auth $xauthority"
 command_user="$KIVORA_USER:$KIVORA_USER"
 respawn_delay=2
+# Restart after crashes, giving up only on a crash loop (5 within a minute).
+respawn_max=5
+respawn_period=60
 
 depend() {
 	need localmount

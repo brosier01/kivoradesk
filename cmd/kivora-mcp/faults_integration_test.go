@@ -46,7 +46,7 @@ func TestFaultChromiumCrash(t *testing.T) {
 	e := setupHost(t)
 	e.call("browser_navigate", map[string]any{"url": "https://example.com"}, false)
 
-	admin(t, "doas pkill -KILL -f /usr/lib/chromium/chromium")
+	admin(t, "doas pkill -KILL -f '[/]usr/lib/chromium/chromium'")
 	start := time.Now()
 	out, _ := e.call("browser_navigate", map[string]any{"url": "https://example.com"}, false)
 	e.mustContain(out, "example.com")
@@ -56,16 +56,21 @@ func TestFaultChromiumCrash(t *testing.T) {
 	e.mustContain(page, "Example Domain")
 }
 
-// TestFaultNetworkLoss removes the VM's default route: the Internet is gone
-// while the server's SSH link to the VM (and so the MCP session) stays up.
+// TestFaultNetworkLoss rejects everything leaving the libvirt network with
+// a temporary firewall table (loopback excepted): the Internet is gone while the server's SSH
+// link to the VM (and so the MCP session) stays up.
 func TestFaultNetworkLoss(t *testing.T) {
 	e := setupHost(t)
-	route := strings.TrimSpace(admin(t, "ip route show default"))
-	if !strings.HasPrefix(route, "default via ") {
-		t.Fatalf("unexpected default route %q", route)
+	restore := func() { exec.Command("../../scripts/vm/ssh.sh", "doas nft delete table inet kivoradesk_fault").Run() }
+	admin(t, `doas nft -f - <<'EOF'
+table inet kivoradesk_fault {
+	chain output {
+		type filter hook output priority filter; policy accept;
+		oifname "lo" accept
+		ip daddr != 192.168.122.0/24 reject
 	}
-	restore := func() { exec.Command("../../scripts/vm/ssh.sh", "doas ip route replace "+route).Run() }
-	admin(t, "doas ip route del default")
+}
+EOF`)
 	t.Cleanup(restore)
 
 	// A never visited URL, so that the browser cache cannot answer.

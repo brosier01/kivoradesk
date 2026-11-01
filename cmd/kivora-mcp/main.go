@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/brosier01/kivoradesk/internal/browser"
+	"github.com/brosier01/kivoradesk/internal/cdp"
 	"github.com/brosier01/kivoradesk/internal/control"
 	"github.com/brosier01/kivoradesk/internal/desktop"
 	"github.com/brosier01/kivoradesk/internal/secrets"
@@ -53,6 +54,9 @@ func main() {
 	}
 	if len(os.Args) > 1 && os.Args[1] == "secrets" {
 		os.Exit(secretsMain(os.Args[2:]))
+	}
+	if len(os.Args) > 1 && os.Args[1] == "browser-close" {
+		os.Exit(browserCloseMain(os.Args[2:]))
 	}
 
 	display := flag.String("display", ":1", "X display of the desktop")
@@ -145,4 +149,38 @@ func secretsMain(args []string) int {
 		return fail(fmt.Errorf("unknown command %q", args[0]))
 	}
 	return 0
+}
+
+// browserCloseMain closes Chromium through DevTools and waits for it to exit.
+// The service manager calls it before stopping the browser: Chromium writes
+// cookies to disk in batches, and only a normal shutdown saves the latest.
+func browserCloseMain(args []string) int {
+	fl := flag.NewFlagSet("browser-close", flag.ContinueOnError)
+	endpoint := fl.String("cdp", "http://127.0.0.1:9222", "Chromium DevTools endpoint")
+	wait := fl.Duration("wait", 15*time.Second, "how long to wait for Chromium to exit")
+	if err := fl.Parse(args); err != nil {
+		return 2
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), *wait+5*time.Second)
+	defer cancel()
+	ws, err := cdp.BrowserURL(ctx, *endpoint)
+	if err != nil {
+		return 0 // not running: nothing to save
+	}
+	conn, err := cdp.Dial(ctx, ws)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "browser-close:", err)
+		return 1
+	}
+	conn.Call(ctx, "", "Browser.close", nil, nil) // the connection drops as it closes
+	conn.Close()
+	deadline := time.Now().Add(*wait)
+	for time.Now().Before(deadline) {
+		if _, err := cdp.BrowserURL(ctx, *endpoint); err != nil {
+			return 0
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	fmt.Fprintln(os.Stderr, "browser-close: Chromium still running after", *wait)
+	return 1
 }
