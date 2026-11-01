@@ -104,10 +104,15 @@ virt-install --connect "$LIBVIRT_URI" \
 	--noautoconsole >/dev/null
 
 log "waiting for SSH"
+forget_host_key
 mapfile -t ssh_opts < <(vm_ssh_opts)
+# cloud-init replaces the host keys during the first boot: keep the key only
+# once it has finished. The first value of an SSH option wins.
+first_boot=(-o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no)
 for _ in $(seq 60); do
 	ip=$(vm_ip)
-	if [[ -n $ip ]] && ssh "${ssh_opts[@]}" "$VM_ADMIN@$ip" true 2>/dev/null; then
+	if [[ -n $ip ]] && ssh "${first_boot[@]}" "${ssh_opts[@]}" "$VM_ADMIN@$ip" 'cloud-init status --wait; true' >/dev/null 2>&1; then
+		ssh "${ssh_opts[@]}" "$VM_ADMIN@$ip" true
 		log "VM ready: ssh -i $KIVORA_SSH_KEY $VM_ADMIN@$ip"
 		exit 0
 	fi

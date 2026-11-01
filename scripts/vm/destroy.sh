@@ -25,6 +25,7 @@ for vol in "${vols[@]}"; do
 	virsh_ vol-delete --pool "$LIBVIRT_POOL" "$vol" >/dev/null 2>&1 || true
 done
 virsh_ net-update "$LIBVIRT_NETWORK" delete ip-dhcp-host "$(dhcp_host_xml)" --live --config >/dev/null 2>&1 || true
+forget_host_key
 
 if ((keep_data)); then
 	log "VM $VM_NAME removed, data disk kept"

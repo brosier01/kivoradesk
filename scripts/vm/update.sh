@@ -20,6 +20,9 @@ done
 
 ((backup)) && "$here/backup.sh"
 
+# Apply the network filter of this checkout.
+define_nwfilter
+
 log "upgrading Alpine packages"
 "$here/ssh.sh" 'doas apk update -q && doas apk upgrade -q --available'
 "$here/provision.sh"
