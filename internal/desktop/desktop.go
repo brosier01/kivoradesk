@@ -15,7 +15,9 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // Desktop is one X display.
@@ -112,13 +114,15 @@ func (d *Desktop) TypeASCII(ctx context.Context, text string) error {
 // Paste puts text on the clipboard and pastes it with ctrl+v. Used for
 // characters outside the keyboard layout, which xdotool types unreliably.
 //
-// xclip serves the selection in the foreground and is stopped once the paste
-// is done: a selection owner left behind stalls x11vnc, which then ignores
-// the human's mouse and keyboard.
+// xclip serves the selection in the foreground and is stopped once the
+// target has fetched it: a selection owner left behind stalls x11vnc, which
+// then ignores the human's mouse and keyboard.
 func (d *Desktop) Paste(ctx context.Context, text string) error {
-	owner := exec.Command("xclip", "-selection", "clipboard", "-in", "-quiet")
+	requests := newRequestLog()
+	owner := exec.Command("xclip", "-selection", "clipboard", "-in", "-verbose")
 	owner.Env = d.env()
 	owner.Stdin = strings.NewReader(text)
+	owner.Stderr = requests
 	if err := owner.Start(); err != nil {
 		return fmt.Errorf("xclip: %w", err)
 	}
@@ -140,11 +144,85 @@ func (d *Desktop) Paste(ctx context.Context, text string) error {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+	requests.waitAbove(ctx, 0, 500*time.Millisecond) // the check above
+	base := requests.served()
 	if _, err := d.xdotool(ctx, "key", "ctrl+v"); err != nil {
 		return err
 	}
-	time.Sleep(250 * time.Millisecond) // let the target fetch the selection
+
+	// Keep the selection until the target has fetched the text and had time
+	// to insert it: Chromium drops a paste when the clipboard changes before
+	// the paste is done, which can take more than 250 ms on a busy host. A
+	// window that does not take text never asks: give up after 2 s.
+	end := time.Now().Add(3 * time.Second)
+	if requests.waitAbove(ctx, base, 2*time.Second) {
+		for n := requests.served(); time.Now().Before(end) && requests.waitAbove(ctx, n, pasteSettle); n = requests.served() {
+		}
+	}
 	return nil
+}
+
+// pasteSettle is how long the paste target must stop asking for the
+// selection before xclip is stopped.
+const pasteSettle = 750 * time.Millisecond
+
+// requestLog counts the selection requests xclip has served, from its
+// verbose output, which announces each request it waits for.
+type requestLog struct {
+	mu      sync.Mutex
+	partial []byte
+	waits   int
+	changed chan struct{}
+}
+
+func newRequestLog() *requestLog {
+	return &requestLog{changed: make(chan struct{}, 1)}
+}
+
+func (l *requestLog) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.partial = append(l.partial, p...)
+	for {
+		i := bytes.IndexByte(l.partial, '\n')
+		if i < 0 {
+			break
+		}
+		if bytes.Contains(l.partial[:i], []byte("Waiting for selection request ")) {
+			l.waits++
+			select {
+			case l.changed <- struct{}{}:
+			default:
+			}
+		}
+		l.partial = l.partial[i+1:]
+	}
+	return len(p), nil
+}
+
+// served returns the number of requests answered: xclip announces the next
+// one after each answer.
+func (l *requestLog) served() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return max(l.waits-1, 0)
+}
+
+// waitAbove waits until more than n requests have been served, and reports
+// whether that happened within d.
+func (l *requestLog) waitAbove(ctx context.Context, n int, d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	for l.served() <= n {
+		select {
+		case <-l.changed:
+		case <-timer.C:
+			return false
+		case <-ctx.Done():
+			return false
+		}
+	}
+	return true
 }
 
 // Windows lists visible top-level windows that have a title. Untitled ones
@@ -254,33 +332,49 @@ func (d *Desktop) env() []string {
 
 func itoa(n int) string { return strconv.Itoa(n) }
 
-// Segment is a run of text typed one way: ASCII through the keyboard, the
-// rest through the clipboard.
+// Segment is a run of text typed one way: through the keyboard (ASCII only)
+// or through the clipboard.
 type Segment struct {
 	Text  string
 	ASCII bool
 }
 
-// SplitText cuts text into segments of at most chunk runes, never mixing
-// ASCII and non-ASCII, so that control can be checked between segments.
+// SplitText cuts text into segments of at most chunk runes, so that control
+// can be checked between segments. ASCII runs are typed; a piece of a line
+// holding any other character is pasted whole, as each paste waits for the
+// target. Newlines and tabs are always typed: pasted, they would not submit
+// a form or move the focus.
 func SplitText(text string, chunk int) []Segment {
 	var segs []Segment
-	var cur []rune
-	curASCII := true
-	flush := func() {
-		if len(cur) > 0 {
-			segs = append(segs, Segment{Text: string(cur), ASCII: curASCII})
-			cur = cur[:0]
+	add := func(piece []rune, ascii bool) {
+		if n := len(segs); n > 0 && ascii && segs[n-1].ASCII && utf8.RuneCountInString(segs[n-1].Text)+len(piece) <= chunk {
+			segs[n-1].Text += string(piece)
+			return
+		}
+		segs = append(segs, Segment{Text: string(piece), ASCII: ascii})
+	}
+	var line []rune
+	flushLine := func() {
+		for len(line) > 0 {
+			piece := line[:min(chunk, len(line))]
+			ascii := true
+			for _, r := range piece {
+				if r < 0x20 || r >= 0x7f {
+					ascii = false
+				}
+			}
+			add(piece, ascii)
+			line = line[len(piece):]
 		}
 	}
 	for _, r := range text {
-		ascii := r == '\n' || r == '\t' || (r >= 0x20 && r < 0x7f)
-		if len(cur) > 0 && (ascii != curASCII || len(cur) >= chunk) {
-			flush()
+		if r == '\n' || r == '\t' {
+			flushLine()
+			add([]rune{r}, true)
+			continue
 		}
-		curASCII = ascii
-		cur = append(cur, r)
+		line = append(line, r)
 	}
-	flush()
+	flushLine()
 	return segs
 }
