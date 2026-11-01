@@ -32,6 +32,10 @@ import (
 // Root is the only directory the file operations accept.
 const Root = "/workspace"
 
+// shellProxy is the only way out of the VM for shell commands, to the sites the
+// human allowed (cmd/kivora-proxy).
+const shellProxy = "http://127.0.0.1:3128"
+
 // ExecResult is the outcome of a shell command.
 type ExecResult struct {
 	ExitCode  int    `json:"exit_code"`
@@ -213,6 +217,8 @@ func runAt(dir, command string, timeout time.Duration, maxOutput int, isolated b
 	cmd.Env = []string{
 		"HOME=" + home, "PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin",
 		"LANG=C.UTF-8", "TERM=dumb", "SHELL=/bin/sh", "USER=" + os.Getenv("USER"),
+		// The firewall leaves the worker no other way out.
+		"https_proxy=" + shellProxy, "HTTPS_PROXY=" + shellProxy, "http_proxy=" + shellProxy,
 	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if isolated {

@@ -34,17 +34,18 @@ else
 fi
 
 if ! report=$("$(dirname "$0")/ssh.sh" 'doas sh -s' 2>/dev/null <<'EOF'
-for svc in kivora-hidepid kivora-firewall kivora-display kivora-wm kivora-browser kivora-vnc kivora-web qemu-guest-agent sshd; do
+for svc in kivora-hidepid kivora-firewall kivora-proxy kivora-display kivora-wm kivora-browser kivora-vnc kivora-web qemu-guest-agent sshd; do
 	if rc-service "$svc" status >/dev/null 2>&1; then echo "ok service $svc"; else echo "fail service $svc is not running"; fi
 done
-for mnt in /data /home/agent /workspace /var/lib/kivora-vault /var/lib/kivora-audit /etc/ssh/authorized_keys; do
+for mnt in /data /home/agent /workspace /var/lib/kivora-vault /var/lib/kivora-audit /var/lib/kivora-proxy /etc/ssh/authorized_keys; do
 	mountpoint -q "$mnt" && echo "ok mount $mnt" || echo "fail mount $mnt is not mounted"
 done
 grep -E ' /(workspace|data) ' /proc/mounts | grep -qv 'nosuid.*nodev' && echo "fail data disk mounted with setuid programs or devices" || echo "ok data disk without setuid programs or devices"
 [ "$(sysctl -n fs.protected_regular 2>/dev/null)" = 2 ] && echo "ok kernel settings applied" || echo "fail kernel settings are not applied"
 [ "$(stat -c '%U %a' /var/lib/kivora-audit 2>/dev/null)" = "kivora-audit 700" ] && echo "ok audit log out of the agent's reach" || echo "fail audit log is not private to its account"
 [ "$(stat -c '%U %a' /var/lib/kivora-vault 2>/dev/null)" = "kivora-vault 700" ] && echo "ok credentials private to the vault account" || echo "fail credentials are not private to the vault account"
-[ "$(nft list table inet kivoradesk 2>/dev/null | grep -c 'fib daddr type local')" = 3 ] && echo "ok firewall rules loaded" || echo "fail firewall rules are missing"
+[ "$(nft list table inet kivoradesk 2>/dev/null | grep -c 'fib daddr type local')" = 3 ] && nft list table inet kivoradesk | grep -q "meta skuid $(id -u worker) reject" && echo "ok firewall rules loaded" || echo "fail firewall rules are missing"
+[ "$(stat -c '%U %a' /var/lib/kivora-proxy/allowlist 2>/dev/null)" = "root 644" ] && echo "ok shell network: $(grep -c . /var/lib/kivora-proxy/allowlist) site(s) allowed" || echo "fail list of the shell's sites is missing or not owned by root"
 grep -q ' /proc proc .*hidepid' /proc/mounts && echo "ok processes hidden between accounts" || echo "fail processes are not hidden between accounts"
 [ "$(stat -c '%U' /etc/ssh/authorized_keys/agent 2>/dev/null)" = root ] && echo "ok SSH keys out of the agent's reach" || echo "fail SSH keys of the agent are not owned by root"
 su -s /bin/sh worker -c '/usr/local/bin/kivora-mcp worker exec -- true' 2>/dev/null | grep -q '"exit_code":0' && echo "ok shell commands run isolated" || echo "fail shell commands cannot run: unprivileged namespaces unavailable?"

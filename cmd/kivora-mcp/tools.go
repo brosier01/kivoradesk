@@ -418,7 +418,7 @@ func (s *server) registerShellAndFiles(srv *mcp.Server) {
 		TimeoutSeconds int    `json:"timeout_seconds,omitempty" jsonschema:"1 to 600, default 60; the whole process group is killed after it"`
 	}
 	add(srv, s, act, &mcp.Tool{Name: "shell_run",
-		Description: "Run a shell command in the VM as an unprivileged user without access to the screen or browser. Returns the exit code and output (long output keeps its head and tail). Available: busybox, curl, ripgrep, bash."},
+		Description: "Run a shell command in the VM as an unprivileged user without access to the screen or browser. Returns the exit code and output (long output keeps its head and tail). Available: busybox, curl, ripgrep, bash. Nothing it starts outlives the call. It only reaches the sites the human allowed, over HTTPS with curl: use browser_download for files from the web."},
 		func(ctx context.Context, in shellIn) ([]mcp.Content, error) {
 			if strings.TrimSpace(in.Command) == "" {
 				return nil, fmt.Errorf("command is empty")
