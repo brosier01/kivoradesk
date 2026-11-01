@@ -14,11 +14,13 @@ import (
 	"fmt"
 	"io"
 	"mime"
+	"net"
 	"net/http"
 	"net/url"
 	"path"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/brosier01/kivoradesk/internal/cdp"
@@ -681,22 +683,8 @@ func (b *Browser) Download(ctx context.Context, rawURL string, limit int64) (io.
 	if err != nil {
 		return nil, "", err
 	}
-	var cookies []struct{ Name, Value string }
 	var ua string
-	err = b.withActive(ctx, func(conn *cdp.Conn, p *cdp.Page) error {
-		var res struct {
-			Cookies []struct {
-				Name  string `json:"name"`
-				Value string `json:"value"`
-			} `json:"cookies"`
-		}
-		if err := p.Call(ctx, "Network.getCookies", map[string]any{"urls": []string{u}}, &res); err != nil {
-			return err
-		}
-		cookies = cookies[:0]
-		for _, c := range res.Cookies {
-			cookies = append(cookies, struct{ Name, Value string }{c.Name, c.Value})
-		}
+	err = b.retry(ctx, func(conn *cdp.Conn) error {
 		var v struct {
 			UserAgent string `json:"userAgent"`
 		}
@@ -715,10 +703,16 @@ func (b *Browser) Download(ctx context.Context, rawURL string, limit int64) (io.
 		return nil, "", err
 	}
 	req.Header.Set("User-Agent", ua)
-	for _, c := range cookies {
-		req.AddCookie(&http.Cookie{Name: c.Name, Value: c.Value})
+	if err := b.addCookies(ctx, req); err != nil {
+		return nil, "", err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	client := &http.Client{Transport: downloadTransport, CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 10 {
+			return errors.New("stopped after 10 redirects")
+		}
+		return b.addCookies(ctx, req)
+	}}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, "", err
 	}
@@ -731,6 +725,66 @@ func (b *Browser) Download(ctx context.Context, rawURL string, limit int64) (io.
 		return nil, "", fmt.Errorf("file is %d bytes, over the %d byte limit", resp.ContentLength, limit)
 	}
 	return resp.Body, suggestName(resp, u), nil
+}
+
+// addCookies gives req the browser's cookies for its URL, and no others: at
+// each redirect, the new site gets its own, and an http URL no secure ones.
+func (b *Browser) addCookies(ctx context.Context, req *http.Request) error {
+	var res struct {
+		Cookies []struct {
+			Name  string `json:"name"`
+			Value string `json:"value"`
+		} `json:"cookies"`
+	}
+	err := b.withActive(ctx, func(_ *cdp.Conn, p *cdp.Page) error {
+		return p.Call(ctx, "Network.getCookies", map[string]any{"urls": []string{req.URL.String()}}, &res)
+	})
+	if err != nil {
+		return err
+	}
+	req.Header.Del("Cookie")
+	for _, c := range res.Cookies {
+		req.AddCookie(&http.Cookie{Name: c.Name, Value: c.Value})
+	}
+	return nil
+}
+
+// downloadTransport never connects to this computer: downloads run as the
+// desktop account, which reaches services that web pages and the worker must
+// not reach. Private networks are left to the filter on the host, which knows
+// the allowed exceptions. The check sees the address after name resolution and
+// applies to redirects too.
+var downloadTransport = &http.Transport{
+	DialContext:         (&net.Dialer{Timeout: 30 * time.Second, Control: refuseLocal}).DialContext,
+	TLSHandshakeTimeout: 30 * time.Second,
+	ForceAttemptHTTP2:   true,
+}
+
+func refuseLocal(_, address string, _ syscall.RawConn) error {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return err
+	}
+	if ip := net.ParseIP(host); ip == nil || isLocalIP(ip) {
+		return fmt.Errorf("refused: %s is an address of this computer", host)
+	}
+	return nil
+}
+
+func isLocalIP(ip net.IP) bool {
+	if ip.IsLoopback() || ip.IsUnspecified() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() {
+		return true
+	}
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return true
+	}
+	for _, addr := range addrs {
+		if n, ok := addr.(*net.IPNet); ok && n.IP.Equal(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 func suggestName(resp *http.Response, rawURL string) string {

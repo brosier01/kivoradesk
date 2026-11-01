@@ -6,7 +6,10 @@
     "devtools://*",
     "chrome-devtools://*",
     "view-source:*",
-    "javascript://*"
+    "javascript://*",
+    "localhost:5900", "127.0.0.1:5900", "[::1]:5900", "0.0.0.0:5900",
+    "localhost:6080", "127.0.0.1:6080", "[::1]:6080", "0.0.0.0:6080",
+    "localhost:9222", "127.0.0.1:9222", "[::1]:9222", "0.0.0.0:9222"
   ],
   "URLAllowlist": [
     "chrome://newtab",

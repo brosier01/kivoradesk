@@ -176,7 +176,7 @@ func TestBrowserLockdown(t *testing.T) {
 	id := regexp.MustCompile(`Tab (\S+):`).FindStringSubmatch(out)[1]
 	t.Cleanup(func() { e.call("browser_close_tab", map[string]any{"id": id}, false) })
 
-	for _, u := range []string{"file:///etc/passwd", "chrome://version", "view-source:https://example.com"} {
+	for _, u := range []string{"file:///etc/passwd", "chrome://version", "view-source:https://example.com", "http://127.0.0.1:9222/json/version"} {
 		e.call("computer_key", map[string]any{"keys": "ctrl+l"}, false)
 		e.call("computer_type", map[string]any{"text": u + "\n"}, false)
 		time.Sleep(time.Second)
@@ -236,6 +236,16 @@ func TestControlSurvivesGatewayRestart(t *testing.T) {
 	}
 	out, _ := e.call("computer_click", map[string]any{"x": 10, "y": 10}, true)
 	e.mustContain(out, "not under agent control")
+}
+
+// TestDownloadStaysOffThisComputer checks that the download tool, which runs as
+// the desktop account, does not reach the local services.
+func TestDownloadStaysOffThisComputer(t *testing.T) {
+	e := setupHost(t)
+	for _, u := range []string{"http://127.0.0.1:9222/json/list", "http://localhost:6080/", "http://[::1]:5900/"} {
+		out, _ := e.call("browser_download", map[string]any{"url": u}, true)
+		e.mustContain(out, "refused")
+	}
 }
 
 // TestBackgroundTabCannotPoseAsVisible opens a page claiming to be visible, then
