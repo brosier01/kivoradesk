@@ -295,15 +295,15 @@ On the server:
 scripts/vm/authorize-key.sh ~/laptop_id_ed25519.pub   # the laptop's public key
 scripts/vm/jump-account.sh ~/laptop_id_ed25519.pub    # prints the commands creating a jump account
 scripts/vm/ssh-config.sh 192.168.1.66 kivora-jump     # how the laptop reaches the server
-scripts/vm/web-url.sh                                 # one-time sign-in URL
-scripts/vm/web-url.sh --rotate                        # new token, signs out every browser
+scripts/vm/web-url.sh                                 # sign-in URL: works once, for 5 minutes
+scripts/vm/web-url.sh --rotate                        # also signs out every browser
 ```
 
 On the laptop, add the output of `ssh-config.sh` to `~/.ssh/config`, then:
 
 ```sh
 ssh -N kivoradesk          # keeps the tunnel open
-open "http://localhost:6080/?token=…"   # the URL from web-url.sh, once
+open "http://kivora.localhost:6080/login?code=…"   # the URL from web-url.sh
 ```
 
 The jump account has no shell and can only forward to the VM's SSH port. Without
@@ -313,8 +313,13 @@ the agent running on the laptop would inherit that access.
 The input owner survives a restart of the gateway or of the VM: if the agent did
 not own the desktop, it stays paused until you hand control back.
 
-The token is stored in a strict same-site cookie. The gateway also rejects
-non-loopback `Host` headers and cross-origin control requests.
+The link gives the browser a session of 30 days, in a strict same-site cookie, and
+is of no use after that. On the VM, sessions are only stored as hashes. The gateway
+also rejects non-loopback `Host` headers and cross-origin control requests.
+
+`kivora.localhost` keeps the cookie away from the other services of the laptop on
+`localhost`. If your browser does not resolve it (Safari may not), add
+`127.0.0.1 kivora.localhost` to `/etc/hosts`.
 
 ## Scenario suite
 
@@ -336,7 +341,7 @@ reasoning:
 ```sh
 go build -o bin/kivora-scenarios ./cmd/kivora-scenarios
 bin/kivora-scenarios -mcp "ssh -i $KEY -T agent@192.168.122.50 /usr/local/bin/kivora-mcp" \
-  -token "$(scripts/vm/ssh.sh 'doas cat /var/lib/kivora-web/token')" \
+  -token "$(scripts/vm/ssh.sh 'doas -u kivora-web /usr/local/bin/kivora-web session')" \
   -scripts "$PWD/scripts/vm" -runs 10
 ```
 
@@ -369,7 +374,7 @@ a key authorized with `authorize-key.sh`):
 ```sh
 KEY=~/.local/share/kivoradesk/ssh/id_ed25519
 KIVORA_WEB_URL=http://localhost:6080 \
-KIVORA_WEB_TOKEN=$(scripts/vm/ssh.sh 'doas cat /var/lib/kivora-web/token') \
+KIVORA_WEB_TOKEN=$(scripts/vm/ssh.sh 'doas -u kivora-web /usr/local/bin/kivora-web session') \
 KIVORA_XDOTOOL="$PWD/scripts/vm/ssh.sh doas -u agent env DISPLAY=:1 xdotool" \
 KIVORA_MCP_COMMAND="ssh -i $KEY -T agent@192.168.122.50 /usr/local/bin/kivora-mcp" \
 go test -tags integration -p 1 ./cmd/...   # one at a time: they share the VM
