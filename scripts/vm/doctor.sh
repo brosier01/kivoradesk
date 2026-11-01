@@ -41,6 +41,7 @@ for mnt in /data /home/agent /workspace /var/lib/kivora-vault; do
 	mountpoint -q "$mnt" && echo "ok mount $mnt" || echo "fail mount $mnt is not mounted"
 done
 [ "$(stat -c '%U %a' /var/lib/kivora-vault 2>/dev/null)" = "kivora-vault 700" ] && echo "ok credentials private to the vault account" || echo "fail credentials are not private to the vault account"
+[ "$(nft list table inet kivoradesk 2>/dev/null | grep -c 'fib daddr type local')" = 3 ] && echo "ok firewall rules loaded" || echo "fail firewall rules are missing"
 grep -q ' /proc proc .*hidepid' /proc/mounts && echo "ok processes hidden between accounts" || echo "fail processes are not hidden between accounts"
 [ -f /etc/chromium/policies/managed/kivora.json ] && echo "ok browser policies installed" || echo "fail browser policies are missing"
 df -P /workspace / | awk 'NR > 1 { pct = $5 + 0; msg = sprintf("disk %s %d%% used, %d MiB free", $6, pct, $4 / 1024);
