@@ -140,3 +140,27 @@ func TestRejectsHugeClipboard(t *testing.T) {
 		t.Fatalf("Run error = %v, want clipboard too large", err)
 	}
 }
+
+// A length out of range ends the connection. The most negative one has no
+// positive counterpart: it must not get past the size check.
+func TestRejectsInvalidClipboardLengths(t *testing.T) {
+	for _, length := range []uint32{0x80000000, 0x7fffffff, 16<<20 + 1, -(16<<20 + 1) & 0xffffffff} {
+		msg := make([]byte, 8)
+		msg[0] = msgClientCutText
+		binary.BigEndian.PutUint32(msg[4:], length)
+		f := NewFilter(io.Discard, func() bool { return true })
+		if err := f.Run(bytes.NewReader(concat(handshake, msg))); err == nil || !strings.Contains(err.Error(), "too large") {
+			t.Errorf("length %#x: Run = %v", length, err)
+		}
+	}
+}
+
+func TestForwardsExtendedClipboard(t *testing.T) {
+	msg := make([]byte, 8)
+	msg[0] = msgClientCutText
+	binary.BigEndian.PutUint32(msg[4:], uint32(0xffffffff)-4) // -5: extended format, 5 bytes
+	stream := concat(handshake, msg, []byte("hello"), fbRequest())
+	if got := run(t, true, stream); !bytes.Equal(got, stream) {
+		t.Fatalf("forwarded %x, want %x", got, stream)
+	}
+}

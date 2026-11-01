@@ -16,6 +16,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 func setupHost(t *testing.T) *e2e {
@@ -210,4 +212,28 @@ func TestLocalServicesByAccount(t *testing.T) {
 	if status("doas -u agent test -e /home/agent/.ssh/authorized_keys") == "0" {
 		t.Error("an SSH key file is left in the home of the desktop account")
 	}
+}
+
+// TestControlSurvivesGatewayRestart checks that restarting the gateway during a
+// human takeover does not hand the desktop back to the agent.
+func TestControlSurvivesGatewayRestart(t *testing.T) {
+	e := setupHost(t)
+	e.setOwner("human")
+	admin(t, "doas rc-service -q kivora-web restart")
+
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		res, err := e.cs.CallTool(e.ctx, callParams("computer_get_state", nil))
+		if err == nil && !res.IsError {
+			out := res.Content[0].(*mcp.TextContent).Text
+			e.mustContain(out, `"owner": "paused"`)
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("gateway not back: %v %v", err, res)
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	out, _ := e.call("computer_click", map[string]any{"x": 10, "y": 10}, true)
+	e.mustContain(out, "not under agent control")
 }

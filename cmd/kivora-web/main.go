@@ -26,6 +26,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -66,7 +67,17 @@ func run(listen, vncAddr, novnc, stateDir, controlSocket string, log *slog.Logge
 	if err != nil {
 		return err
 	}
-	s := &server{token: token, vncAddr: vncAddr, state: control.New(control.Agent), log: log}
+	controlFile := filepath.Join(stateDir, "control.json")
+	s := &server{token: token, vncAddr: vncAddr, state: loadControl(controlFile, log), log: log}
+	var saving sync.Mutex
+	s.state.OnChange(func(control.Snapshot) {
+		// The latest state, whatever the order of concurrent changes.
+		saving.Lock()
+		defer saving.Unlock()
+		if err := saveControl(controlFile, s.state.Get()); err != nil {
+			log.Error("save control state", "err", err)
+		}
+	})
 
 	static, err := fs.Sub(webFS, "web")
 	if err != nil {
@@ -134,6 +145,38 @@ func loadToken(path string) (string, error) {
 		return "", fmt.Errorf("write token: %w", err)
 	}
 	return token, nil
+}
+
+// loadControl resumes the input control state of the previous run, so that a
+// restart never hands the desktop to the agent behind the human's back. On the
+// very first start the agent owns the desktop; if the saved state cannot be
+// read, the agent is paused.
+func loadControl(path string, log *slog.Logger) *control.State {
+	b, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return control.New(control.Agent)
+	}
+	var saved control.Snapshot
+	if err == nil {
+		err = json.Unmarshal(b, &saved)
+	}
+	if err != nil {
+		log.Error("read control state, pausing the agent", "err", err)
+		return control.New(control.Paused)
+	}
+	return control.Restore(saved)
+}
+
+func saveControl(path string, snap control.Snapshot) error {
+	b, err := json.Marshal(snap)
+	if err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }
 
 // checkHost rejects requests whose Host is not a loopback name, which defeats

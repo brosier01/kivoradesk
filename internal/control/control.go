@@ -59,6 +59,21 @@ func New(initial Owner) *State {
 	}
 }
 
+// Restore returns a state resuming from a snapshot saved by a previous run.
+// Control that was not the agent's does not go back to it: after a restart,
+// a human owner may no longer be at the viewer, so the agent stays paused until
+// the human hands control back. A pending request is kept, and seq keeps growing.
+func Restore(saved Snapshot) *State {
+	owner := Paused
+	if saved.Owner == Agent {
+		owner = Agent
+	}
+	s := New(owner)
+	s.cur.Seq = saved.Seq + 1
+	s.cur.Request = saved.Request
+	return s
+}
+
 // Get returns the current snapshot.
 func (s *State) Get() Snapshot {
 	s.mu.Lock()

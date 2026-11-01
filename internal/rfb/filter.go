@@ -210,7 +210,7 @@ func readMessage(r io.Reader) (msg []byte, input bool, err error) {
 		err, input = read(5), true
 	case msgClientCutText:
 		if err = read(7); err == nil {
-			n := int32(binary.BigEndian.Uint32(msg[4:]))
+			n := int64(int32(binary.BigEndian.Uint32(msg[4:])))
 			if n < 0 { // extended clipboard
 				n = -n
 			}
