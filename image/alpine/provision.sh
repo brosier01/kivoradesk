@@ -66,6 +66,18 @@ rm -rf /usr/share/novnc
 mv "$novnc_tmp/root/usr/share/novnc" /usr/share/novnc
 rm -rf "$novnc_tmp"
 
+# cloud-init only matters on the first boot, which created the admin
+# account, the SSH keys and the network configuration. Afterwards it slows
+# every boot down and keeps Python installed.
+if apk info -e cloud-init >/dev/null; then
+	log "removing cloud-init"
+	cloud-init status --wait >/dev/null 2>&1 || true # first boot finished
+	apk del -q cloud-init
+fi
+for svc in cloud-final cloud-config cloud-init cloud-init-hotplugd cloud-init-local cloud-getty; do
+	rc-update -a del "$svc" >/dev/null 2>&1 || true
+done
+
 # Boot without waiting at the boot menu.
 [ -f /boot/limine/limine.conf ] && sed -i 's/^timeout: .*/timeout: 1/' /boot/limine/limine.conf
 
