@@ -43,10 +43,12 @@ stop_pre() {
 start_pre() {
 	# Chromium is stopped with a signal, records an unclean exit and offers
 	# to restore pages on the next start, which gets in the agent's way.
-	# Mark the last exit as clean.
-	local prefs="/home/$KIVORA_USER/.config/chromium/Default/Preferences"
-	[ -f "$prefs" ] || return 0
-	sed -i -e 's/"exit_type":"[A-Za-z]*"/"exit_type":"Normal"/' \
-		-e 's/"exited_cleanly":false/"exited_cleanly":true/' "$prefs"
-	chown "$KIVORA_USER:$KIVORA_USER" "$prefs"
+	# Mark the last exit as clean. As the desktop account: this file is in its
+	# home, and root must not follow a link planted there.
+	su -s /bin/sh "$KIVORA_USER" <<-'EOF' || true
+		prefs=$HOME/.config/chromium/Default/Preferences
+		[ -f "$prefs" ] || exit 0
+		sed -i -e 's/"exit_type":"[A-Za-z]*"/"exit_type":"Normal"/' \
+			-e 's/"exited_cleanly":false/"exited_cleanly":true/' "$prefs"
+	EOF
 }

@@ -1,8 +1,8 @@
 # KivoraDesk local firewall, loaded by the kivora-firewall service.
 #
-# The worker account runs the agent's shell commands. Keep it away from the
-# local services that control the desktop: Chromium DevTools, VNC and the
-# web gateway all listen on loopback.
+# The worker account runs the agent's shell commands. Keep it away from every
+# service of the VM, on loopback or on its own address (sshd), and each local
+# service that controls the desktop reserved to the accounts that need it.
 
 table inet kivoradesk
 delete table inet kivoradesk
@@ -10,7 +10,11 @@ delete table inet kivoradesk
 table inet kivoradesk {
 	chain output {
 		type filter hook output priority filter; policy accept;
-		meta skuid "worker" ip daddr 127.0.0.0/8 reject
-		meta skuid "worker" ip6 daddr ::1 reject
+		meta skuid "worker" fib daddr type local reject
+		# VNC has no password: only the gateway may connect, which also keeps
+		# web pages in the browser away from it.
+		meta skuid != "kivora-web" tcp dport 5900 fib daddr type local reject
+		# DevTools: the MCP server, and root for a clean browser shutdown.
+		meta skuid != { "agent", "root" } tcp dport 9222 fib daddr type local reject
 	}
 }

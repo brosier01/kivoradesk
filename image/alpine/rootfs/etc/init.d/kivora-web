@@ -19,7 +19,7 @@ output_log=/var/log/kivora-web.log
 error_log=/var/log/kivora-web.log
 
 depend() {
-	need net
+	need net kivora-firewall
 	after kivora-vnc
 }
 
