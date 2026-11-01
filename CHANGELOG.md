@@ -5,6 +5,63 @@ All notable changes to KivoraDesk are documented here. The format follows
 [Semantic Versioning](https://semver.org/). Before 1.0, minor versions may
 break compatibility.
 
+## 0.2.0 - 2026-11-01
+
+Robustness and day-to-day operation: the computer recovers from failures,
+keeps its data safe and can sign in to sites without exposing passwords.
+
+### Added
+
+- **Credentials.** A store on the VM's data disk, readable only by the
+  desktop account (not encrypted on the VM; backups are), where each
+  credential is bound to the sites (HTTPS origins) where it may be used.
+  `secrets_list` and `secrets_fill` let the agent sign in without the value
+  ever reaching the model; `secret.sh` manages credentials from the server,
+  and password fields are masked in `browser_read_page`.
+- **Backups.** `backup.sh` saves the data disk into GPG-encrypted files while
+  the VM runs (filesystem freeze, libvirt backup), `restore.sh` brings one
+  back, `update.sh` upgrades the VM packages and KivoraDesk (with a backup
+  first and a reboot when a new kernel is installed) and `recover.sh` rebuilds
+  the system disk while keeping the data.
+- **Diagnosis.** `doctor.sh` checks the VM, services, isolation, gateway and
+  browser in one pass; `computer_get_state` warns when disk space runs low.
+- **Network allowlist.** `allow.sh` opens chosen private services (address and
+  port) through the network filter; `check-isolation.sh` reports them.
+- **Mobile live view.** The web view adapts to phones.
+- **Scenario suite.** `kivora-scenarios` runs 30 complete workflows (search,
+  reading, forms, downloads, tabs, shell and files, takeover, credentials,
+  browser crash, Internet loss) through the real MCP server and reports the
+  success rate.
+
+### Changed
+
+- Every tool call has a time limit, and navigations stop after 45 s.
+- The audit log is written per day, kept 90 days, with secrets redacted.
+- Browser tools wait for Chromium to come back after a crash, and the
+  browser is restarted without limit; other services allow 5 restarts a
+  minute.
+- Chromium is closed normally before it is stopped, so sessions and cookies
+  survive restarts and updates.
+
+### Fixed
+
+- `computer_focus_window` took 15 s and could report success without
+  activating the window; it now lists titled windows only and checks focus.
+- `doctor.sh` no longer reports a failure right after a deployment while
+  Chromium starts.
+
+### Measured
+
+- Scenario suite: 300/300 runs (30 scenarios, 10 runs each), goal 90 %.
+- Backup of the data disk in about 4 s (52 MiB), restore in about 35 s.
+
+### Known limitations
+
+- Closing the laptop still stops the agent; the VM, browser and files stay
+  intact.
+- Without Internet, a navigation can take up to 45 s to fail.
+- Backups are manual (no schedule).
+
 ## 0.1.0 - 2026-10-31
 
 First release: Claude Code on a laptop drives a persistent Alpine Linux VM on
