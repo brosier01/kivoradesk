@@ -1,6 +1,9 @@
 package worker
 
 import (
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -59,5 +62,22 @@ func TestRunReportsExitCodeAndOutput(t *testing.T) {
 
 // runIn runs with the workspace replaced by dir, for tests on any machine.
 func runIn(dir, command string, timeout time.Duration) ExecResult {
-	return runAt(dir, command, timeout, 1<<10)
+	return runAt(dir, command, timeout, 1<<10, false)
+}
+
+// Some systems refuse unprivileged namespaces to tests: Ubuntu does, by default.
+// The integration tests cover the VM.
+func TestIsolatedCommandLeavesNothingBehind(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "alive")
+	res := runAt(t.TempDir(), "(setsid sh -c 'sleep 2; echo late >"+marker+"' >/dev/null 2>&1 &) ; id -u; echo done", 5*time.Second, 1<<10, true)
+	if res.ExitCode == -1 && strings.Contains(res.Output, "operation not permitted") {
+		t.Skip("unprivileged namespaces are not available here")
+	}
+	if res.ExitCode != 0 || !strings.Contains(res.Output, "done") || !strings.Contains(res.Output, strconv.Itoa(os.Getuid())) {
+		t.Fatalf("run = %+v", res)
+	}
+	time.Sleep(3 * time.Second)
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("a detached process outlived the command")
+	}
 }

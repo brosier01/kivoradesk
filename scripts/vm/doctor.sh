@@ -44,6 +44,7 @@ done
 [ "$(nft list table inet kivoradesk 2>/dev/null | grep -c 'fib daddr type local')" = 3 ] && echo "ok firewall rules loaded" || echo "fail firewall rules are missing"
 grep -q ' /proc proc .*hidepid' /proc/mounts && echo "ok processes hidden between accounts" || echo "fail processes are not hidden between accounts"
 [ "$(stat -c '%U' /etc/ssh/authorized_keys/agent 2>/dev/null)" = root ] && echo "ok SSH keys out of the agent's reach" || echo "fail SSH keys of the agent are not owned by root"
+su -s /bin/sh worker -c '/usr/local/bin/kivora-mcp worker exec -- true' 2>/dev/null | grep -q '"exit_code":0' && echo "ok shell commands run isolated" || echo "fail shell commands cannot run: unprivileged namespaces unavailable?"
 [ -f /etc/chromium/policies/managed/kivora.json ] && echo "ok browser policies installed" || echo "fail browser policies are missing"
 df -P /workspace / | awk 'NR > 1 { pct = $5 + 0; msg = sprintf("disk %s %d%% used, %d MiB free", $6, pct, $4 / 1024);
 	print (pct >= 90 ? "warn " : "ok ") msg }'

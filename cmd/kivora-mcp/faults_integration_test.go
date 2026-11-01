@@ -273,3 +273,18 @@ func TestBackgroundTabCannotPoseAsVisible(t *testing.T) {
 		t.Fatalf("more than one tab claims to be on screen:\n%s", tabs)
 	}
 }
+
+// TestWorkerProcessesEndWithTheirCall checks that nothing the agent runs
+// outlives its call, even detached, and that the limits apply.
+func TestWorkerProcessesEndWithTheirCall(t *testing.T) {
+	e := setupHost(t)
+	out, _ := e.call("shell_run", map[string]any{"command": "(setsid nohup sleep 271 >/dev/null 2>&1 &); id -un; ulimit -u; ulimit -v; cat /proc/self/oom_score_adj; touch kivora-e2e-file; ls -l kivora-e2e-file; rm kivora-e2e-file"}, false)
+	e.mustContain(out, "worker")
+	e.mustContain(out, "512")
+	e.mustContain(out, "1000")
+	e.mustContain(out, "exit code 0")
+	out, _ = e.call("shell_run", map[string]any{"command": "ps -o args | grep -c '[s]leep 271'; true"}, false)
+	if !regexp.MustCompile(`(?m)^0$`).MatchString(out) {
+		t.Fatalf("a detached process outlived its call:\n%s", out)
+	}
+}
