@@ -52,9 +52,19 @@ log "installing packages"
 apk update -q
 apk add -q \
 	xvfb xauth openbox xdotool x11vnc scrot xwininfo xprop \
-	chromium font-dejavu dbus novnc \
+	chromium font-dejavu dbus \
 	bash curl libgcc libstdc++ ripgrep xclip \
 	e2fsprogs acl nftables qemu-guest-agent
+
+# Only noVNC's web client is needed: the package also pulls websockify,
+# Python and NumPy, which the kivora-web gateway replaces.
+log "installing the noVNC web client"
+apk info -e novnc >/dev/null && apk del -q novnc
+novnc_tmp=$(mktemp -d)
+(cd "$novnc_tmp" && apk fetch -q novnc && mkdir root && apk extract -q --destination root novnc-*.apk >/dev/null)
+rm -rf /usr/share/novnc
+mv "$novnc_tmp/root/usr/share/novnc" /usr/share/novnc
+rm -rf "$novnc_tmp"
 
 # Boot without waiting at the boot menu.
 [ -f /boot/limine/limine.conf ] && sed -i 's/^timeout: .*/timeout: 1/' /boot/limine/limine.conf
