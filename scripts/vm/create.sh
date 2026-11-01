@@ -5,6 +5,7 @@ source "$(dirname "$0")/common.sh"
 
 command -v xorriso >/dev/null || die "xorriso is required to build the cloud-init seed"
 command -v qemu-img >/dev/null || die "qemu-img is required"
+command -v gpgv >/dev/null || die "gpgv is required to verify the base image"
 
 if virsh_ dominfo "$VM_NAME" >/dev/null 2>&1; then
 	die "VM '$VM_NAME' already exists (scripts/vm/destroy.sh to remove it)"
@@ -17,18 +18,26 @@ if [[ ! -f $KIVORA_SSH_KEY ]]; then
 	ssh-keygen -q -t ed25519 -N '' -C "kivoradesk-admin" -f "$KIVORA_SSH_KEY"
 fi
 
-# Base image, verified against the published SHA-512.
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+
+# Base image, verified against its signature: a checksum from the same mirror
+# would only detect a damaged download. The key is the one Alpine publishes for
+# its cloud images (https://alpinelinux.org/keys/tomalok.asc).
 mkdir -p "$KIVORA_CACHE_DIR"
 base=$KIVORA_CACHE_DIR/$ALPINE_IMAGE
 url=$ALPINE_MIRROR/$ALPINE_BRANCH/releases/cloud/$ALPINE_IMAGE
 if [[ ! -f $base ]]; then
 	log "downloading $url"
-	curl -fSL -o "$base.part" "$url"
+	curl --proto '=https' -fSL -o "$base.part" "$url"
 	mv "$base.part" "$base"
 fi
-curl -fsSL -o "$base.sha512" "$url.sha512"
-echo "$(cut -d' ' -f1 <"$base.sha512")  $base" | sha512sum --check --quiet ||
-	die "checksum mismatch for $base"
+curl --proto '=https' -fsSL -o "$work/base.asc" "$url.asc"
+gpg --batch --quiet --dearmor -o "$work/keyring.gpg" "$REPO_ROOT/image/alpine/cloud-images-signing-key.asc"
+if ! gpgv --quiet --keyring "$work/keyring.gpg" "$work/base.asc" "$base" 2>/dev/null; then
+	rm -f "$base"
+	die "bad signature for $ALPINE_IMAGE: file removed from the cache"
+fi
 
 # Storage pool owned by libvirt, so no sudo is needed on the host.
 if ! virsh_ pool-info "$LIBVIRT_POOL" >/dev/null 2>&1; then
@@ -38,9 +47,6 @@ if ! virsh_ pool-info "$LIBVIRT_POOL" >/dev/null 2>&1; then
 	virsh_ pool-autostart "$LIBVIRT_POOL" >/dev/null
 fi
 virsh_ pool-start "$LIBVIRT_POOL" >/dev/null 2>&1 || true
-
-work=$(mktemp -d)
-trap 'rm -rf "$work"' EXIT
 
 # upload_volume NAME FORMAT FILE creates a pool volume holding FILE.
 upload_volume() {
