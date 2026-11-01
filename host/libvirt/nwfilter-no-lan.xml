@@ -8,9 +8,10 @@
   host to the VM (SSH) keep working because only NEW outgoing traffic is
   dropped.
 
-  @GATEWAY@ is replaced by the libvirt network gateway address.
+  @NWFILTER@ is replaced by the name of the filter, and @GATEWAY@ by the libvirt
+  network gateway address.
 -->
-<filter name='kivoradesk-no-lan' chain='root'>
+<filter name='@NWFILTER@' chain='root'>
   <rule action='accept' direction='out' priority='100'>
     <udp dstipaddr='@GATEWAY@' dstportstart='53'/>
   </rule>
