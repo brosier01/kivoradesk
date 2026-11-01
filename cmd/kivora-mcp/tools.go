@@ -62,7 +62,7 @@ func (s *server) registerComputer(srv *mcp.Server) {
 						"(shell_run: du -sh /workspace/* | sort -h | tail), and delete nothing without their confirmation."
 				}
 			}
-			return jsonText(state), nil
+			return untrustedJSON("desktop state", state), nil
 		})
 
 	type clickIn struct {
@@ -197,7 +197,7 @@ func (s *server) registerComputer(srv *mcp.Server) {
 			if err != nil {
 				return nil, err
 			}
-			return jsonText(wins), nil
+			return untrustedJSON("window list", wins), nil
 		})
 
 	type focusIn struct {
@@ -219,7 +219,7 @@ func (s *server) registerBrowser(srv *mcp.Server) {
 			if err != nil {
 				return nil, err
 			}
-			return jsonText(tabs), nil
+			return untrustedJSON("browser tabs", tabs), nil
 		})
 
 	type urlIn struct {
@@ -389,7 +389,7 @@ func (s *server) registerBrowser(srv *mcp.Server) {
 			if err != nil {
 				return nil, err
 			}
-			return text("Saved /workspace/%s (%d bytes) from %s.", rel, len(data), tab.URL), nil
+			return text("Saved %s (%d bytes).", untrustedInline(fmt.Sprintf("/workspace/%s from %s", rel, tab.URL)), len(data)), nil
 		})
 
 	type dlIn struct {
@@ -408,7 +408,7 @@ func (s *server) registerBrowser(srv *mcp.Server) {
 			if err != nil {
 				return nil, err
 			}
-			return text("Saved /workspace/%s.", rel), nil
+			return text("Saved %s.", untrustedInline("/workspace/"+rel)), nil
 		})
 }
 
@@ -444,7 +444,7 @@ func (s *server) registerShellAndFiles(srv *mcp.Server) {
 			if err != nil {
 				return nil, err
 			}
-			return jsonText(entries), nil
+			return untrustedJSON("file list", entries), nil
 		})
 
 	type readIn struct {

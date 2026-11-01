@@ -35,6 +35,7 @@ KIVORA_ALLOWLIST=${KIVORA_ALLOWLIST:-${XDG_DATA_HOME:-$HOME/.local/share}/kivora
 KIVORA_DATA_DIR=${KIVORA_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/kivoradesk}
 KIVORA_CACHE_DIR=$KIVORA_DATA_DIR/cache
 KIVORA_SSH_KEY=$KIVORA_DATA_DIR/ssh/id_ed25519
+KIVORA_KNOWN_HOSTS=$KIVORA_DATA_DIR/ssh/known_hosts
 
 # Encrypted backups of the data disk. Without the passphrase file, backups
 # cannot be restored: keep a copy of it somewhere else.
@@ -57,12 +58,20 @@ vm_ip() {
 		awk '/ipv4/ { split($4, a, "/"); print a[1]; exit }'
 }
 
+# The VM's host key is kept once seen: these scripts run root commands in the
+# VM and send it credentials.
 vm_ssh_opts() {
 	printf '%s\n' -i "$KIVORA_SSH_KEY" \
-		-o StrictHostKeyChecking=no \
-		-o UserKnownHostsFile=/dev/null \
+		-o StrictHostKeyChecking=accept-new \
+		-o "UserKnownHostsFile=$KIVORA_KNOWN_HOSTS" \
 		-o LogLevel=ERROR \
 		-o ConnectTimeout=5
+}
+
+# forget_host_key is for a new system disk, which comes with a new host key.
+forget_host_key() {
+	ssh-keygen -q -R "$VM_IP" -f "$KIVORA_KNOWN_HOSTS" >/dev/null 2>&1 || true
+	rm -f "$KIVORA_KNOWN_HOSTS.old"
 }
 
 # allow_rule turns an allowlist entry (IP[/BITS][:PORT]) into an nwfilter rule.
@@ -94,9 +103,9 @@ define_nwfilter() {
 			rules+=$(allow_rule "$entry")$'\n'
 		done <"$KIVORA_ALLOWLIST"
 	fi
-	xml=$(sed "s|@GATEWAY@|$gateway|g" "$REPO_ROOT/host/libvirt/nwfilter-no-lan.xml")
+	xml=$(sed -e "s|@NWFILTER@|$NWFILTER|g" -e "s|@GATEWAY@|$gateway|g" "$REPO_ROOT/host/libvirt/nwfilter-no-lan.xml")
 	# Redefining an existing filter must keep its UUID.
-	uuid=$(virsh_ nwfilter-dumpxml "$NWFILTER" 2>/dev/null | sed -n 's|.*<uuid>\(.*\)</uuid>.*|\1|p')
+	uuid=$({ virsh_ nwfilter-dumpxml "$NWFILTER" 2>/dev/null || true; } | sed -n 's|.*<uuid>\(.*\)</uuid>.*|\1|p')
 	if [[ -n $uuid ]]; then
 		xml=${xml/"<filter name='$NWFILTER' chain='root'>"/"<filter name='$NWFILTER' chain='root'>"$'\n'"  <uuid>$uuid</uuid>"}
 	fi

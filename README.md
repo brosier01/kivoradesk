@@ -64,8 +64,17 @@ Laptop                              Homelab server (Linux, KVM)
   helper). Each account only sees its own processes. VNC is reserved to the
   gateway and DevTools to `agent`. Code the agent runs cannot drive the desktop
   behind the lock.
-- **Untrusted content.** Page text, file content and command output are wrapped
-  as untrusted data. Tools declare MCP annotations (read-only, destructive).
+- **Untrusted content.** Page text, titles, addresses, file names and content,
+  window names and command output are wrapped as untrusted data, in a tag with a
+  random ID that the content cannot close. Screenshots cannot be wrapped. Tools
+  declare MCP annotations (read-only, destructive).
+- **Browser tools.** Their scripts run in an isolated world: a page cannot change
+  what they read, pretend to be the visible tab or move the numbers of its
+  elements. `browser_download` refuses the addresses of the VM itself.
+- **Shell limits.** Nothing `shell_run` starts outlives the call, even detached
+  (each call has its own PID namespace, which needs unprivileged user namespaces).
+  512 processes, 3 GiB per process and 8 GiB per file at most, low priority, and
+  the first killed when memory runs out.
 - **Typing.** `browser_type` inserts any text exactly through CDP.
   `computer_type` types ASCII with the keyboard and pastes other characters
   through the clipboard, checking control between chunks.
@@ -177,7 +186,9 @@ scripts/vm/allow.sh add 192.168.1.20:8080 staging   # let the VM reach one priva
 ```
 
 Settings (VM name, sizes, fixed IP, Alpine release, libvirt pool) can be
-overridden through the environment; see `scripts/vm/common.sh`. The VM gets a
+overridden through the environment; see `scripts/vm/common.sh`. For a second VM,
+also set `VM_MAC`, `VM_IP` and `NWFILTER`: the network filter is shared by name,
+and redefining it applies at once to every VM using it. The VM gets a
 DHCP reservation (`192.168.122.50` by default) on the libvirt network. Data
 that must stay out of the repository (SSH key, image cache) lives in
 `~/.local/share/kivoradesk`.
@@ -203,8 +214,9 @@ The VM is kept off private networks by a libvirt network filter
 inside the VM can lift it. New connections to 10.0.0.0/8, 172.16.0.0/12,
 192.168.0.0/16, 169.254.0.0/16 and 100.64.0.0/10 are dropped, except DNS and
 DHCP on the libvirt gateway; the host can still open SSH sessions to the VM.
-`check-isolation.sh` verifies this against the host's own addresses and the
-LAN router. `allow.sh add|remove|list` manages exceptions (an address,
+The filter also keeps the VM from taking the MAC or IP address of another machine
+and drops everything but IPv4 and ARP, so IPv6 too. `check-isolation.sh` verifies
+this against the host's own addresses and the LAN router. `allow.sh add|remove|list` manages exceptions (an address,
 optionally a CIDR and a TCP port), kept in `~/.local/share/kivoradesk/allowlist`
 on the host and applied to the running VM at once.
 

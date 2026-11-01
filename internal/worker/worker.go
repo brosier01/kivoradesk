@@ -20,10 +20,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // Root is the only directory the file operations accept.
@@ -155,17 +158,55 @@ func mainExec(args []string) error {
 	if fl.NArg() != 1 {
 		return errors.New("exec takes exactly one command string")
 	}
-	res := run(fl.Arg(0), *timeout, *maxOutput)
+	if err := applyLimits(); err != nil {
+		return fmt.Errorf("limit the command: %w", err)
+	}
+	res := runAt(Root, fl.Arg(0), *timeout, *maxOutput, true)
 	return json.NewEncoder(os.Stdout).Encode(res)
 }
 
-func run(command string, timeout time.Duration, maxOutput int) ExecResult {
-	return runAt(Root, command, timeout, maxOutput)
+// applyLimits bounds what a command and its children can take from the desktop
+// sharing this VM. The memory limit is per process: the out-of-memory killer
+// also picks them first, before the browser or sshd.
+func applyLimits() error {
+	for _, l := range []struct {
+		resource int
+		max      uint64
+	}{
+		{unix.RLIMIT_NPROC, 512},
+		{unix.RLIMIT_AS, 3 << 30},
+		{unix.RLIMIT_FSIZE, 8 << 30},
+		{unix.RLIMIT_CORE, 0},
+	} {
+		if err := unix.Setrlimit(l.resource, &unix.Rlimit{Cur: l.max, Max: l.max}); err != nil {
+			return err
+		}
+	}
+	if err := unix.Setpriority(unix.PRIO_PROCESS, 0, 10); err != nil {
+		return err
+	}
+	return os.WriteFile("/proc/self/oom_score_adj", []byte("1000"), 0)
+}
+
+// isolate gives the command a PID namespace of its own: when the shell ends,
+// the kernel kills everything left in it, whatever a process did to detach
+// itself. Nothing the agent runs outlives its call. The user namespace is what
+// allows an unprivileged account to create it; the account stays the same.
+func isolate(attr *syscall.SysProcAttr) {
+	uid, gid := os.Getuid(), os.Getgid()
+	attr.Cloneflags = syscall.CLONE_NEWUSER | syscall.CLONE_NEWPID
+	attr.UidMappings = []syscall.SysProcIDMap{{ContainerID: uid, HostID: uid, Size: 1}}
+	attr.GidMappings = []syscall.SysProcIDMap{{ContainerID: gid, HostID: gid, Size: 1}}
+	attr.GidMappingsEnableSetgroups = false
+	// If the helper is killed, the shell goes too, and with it the namespace.
+	// The signal is tied to the thread that starts the command.
+	attr.Pdeathsig = syscall.SIGKILL
+	runtime.LockOSThread()
 }
 
 // runAt executes command in dir, in its own process group, so that a timeout
 // kills everything it started, not just the shell.
-func runAt(dir, command string, timeout time.Duration, maxOutput int) ExecResult {
+func runAt(dir, command string, timeout time.Duration, maxOutput int, isolated bool) ExecResult {
 	home, _ := os.UserHomeDir()
 	cmd := exec.Command("/bin/sh", "-c", command)
 	cmd.Dir = dir
@@ -174,6 +215,9 @@ func runAt(dir, command string, timeout time.Duration, maxOutput int) ExecResult
 		"LANG=C.UTF-8", "TERM=dumb", "SHELL=/bin/sh", "USER=" + os.Getenv("USER"),
 	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if isolated {
+		isolate(cmd.SysProcAttr)
+	}
 	buf := &capped{max: maxOutput}
 	cmd.Stdout, cmd.Stderr = buf, buf
 

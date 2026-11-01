@@ -123,7 +123,7 @@ var scenarios = []scenario{
 			return fmt.Errorf("expected two tabs: %s", oneLine(out))
 		}
 		var tabs []struct{ ID, URL string }
-		if err := json.Unmarshal([]byte(out), &tabs); err != nil {
+		if err := json.Unmarshal([]byte(jsonList(out)), &tabs); err != nil {
 			return err
 		}
 		first := ""

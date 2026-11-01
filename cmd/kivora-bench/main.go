@@ -100,9 +100,9 @@ func main() {
 	}
 	f.sites = strings.Split(*sites, ",")
 	if f.mcpCmd == "" {
-		key := os.ExpandEnv("$HOME/.local/share/kivoradesk/ssh/id_ed25519")
-		// Like scripts/vm: the VM gets new host keys when it is rebuilt.
-		f.mcpCmd = "ssh -i " + key + " -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null" +
+		dir := os.ExpandEnv("$HOME/.local/share/kivoradesk/ssh")
+		// Like scripts/vm: the host key is kept once seen.
+		f.mcpCmd = "ssh -i " + dir + "/id_ed25519 -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=" + dir + "/known_hosts" +
 			" -o LogLevel=ERROR -T agent@192.168.122.50 /usr/local/bin/kivora-mcp"
 	}
 
@@ -359,7 +359,9 @@ func measureLoaded(c *client, f benchFlags) (memory, error) {
 	var tabs []struct {
 		ID string `json:"id"`
 	}
-	json.Unmarshal([]byte(out), &tabs)
+	if start, end := strings.Index(out, "["), strings.LastIndex(out, "]"); start >= 0 && end > start {
+		json.Unmarshal([]byte(out[start:end+1]), &tabs) // inside the untrusted wrapper
+	}
 	for i, t := range tabs {
 		if i > 0 {
 			c.call("browser_close_tab", map[string]any{"id": t.ID})

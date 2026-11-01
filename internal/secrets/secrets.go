@@ -216,8 +216,8 @@ func (s *Store) ValueFor(name, pageURL string) (Grant, error) {
 	}
 	origin, err := NormalizeOrigin(pageURL)
 	if err != nil || !slices.Contains(sec.Origins, origin) {
-		return Grant{}, fmt.Errorf("secret %q may only be used on %s, not on this page (%s)",
-			name, strings.Join(sec.Origins, ", "), pageURL)
+		return Grant{}, fmt.Errorf("secret %q may only be used on %s, not on this page",
+			name, strings.Join(sec.Origins, ", "))
 	}
 	return Grant{Value: sec.Value, Origin: origin, Field: sec.field()}, nil
 }

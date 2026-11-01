@@ -2,7 +2,8 @@
 // navigation, tabs, reading pages as text and acting on page elements.
 //
 // It always works on the tab the human sees (the visible one), so that the
-// structured tools and the screenshots describe the same desktop.
+// structured tools and the screenshots describe the same desktop. Its scripts
+// run in an isolated world, out of reach of the JavaScript of the page.
 package browser
 
 import (
@@ -13,11 +14,13 @@ import (
 	"fmt"
 	"io"
 	"mime"
+	"net"
 	"net/http"
 	"net/url"
 	"path"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/brosier01/kivoradesk/internal/cdp"
@@ -30,6 +33,10 @@ const StartupWait = 30 * time.Second
 
 // NavigationTimeout bounds a navigation, including the page load.
 const NavigationTimeout = 45 * time.Second
+
+// tabProbeTimeout bounds asking a tab whether it is visible. A tab that does
+// not answer is busy, or showing a dialog.
+const tabProbeTimeout = 3 * time.Second
 
 // Browser is a lazily (re)connected DevTools client.
 type Browser struct {
@@ -164,10 +171,7 @@ func (b *Browser) Tabs(ctx context.Context) ([]Tab, error) {
 		for _, t := range ts {
 			tab := Tab{ID: t.ID, Title: t.Title, URL: t.URL}
 			if p, err := b.attach(ctx, conn, t.ID); err == nil {
-				var state string
-				if p.Eval(ctx, "document.visibilityState", &state) == nil && state == "visible" {
-					tab.Active = true
-				}
+				tab.Active, _ = visible(ctx, p)
 			}
 			tabs = append(tabs, tab)
 		}
@@ -186,6 +190,7 @@ func (b *Browser) active(ctx context.Context, conn *cdp.Conn) (*cdp.Page, error)
 		return nil, errors.New("no browser tab is open; use browser_new_tab")
 	}
 	var first *cdp.Page
+	stuck := false
 	for _, t := range ts {
 		p, err := b.attach(ctx, conn, t.ID)
 		if err != nil {
@@ -194,15 +199,29 @@ func (b *Browser) active(ctx context.Context, conn *cdp.Conn) (*cdp.Page, error)
 		if first == nil {
 			first = p
 		}
-		var state string
-		if p.Eval(ctx, "document.visibilityState", &state) == nil && state == "visible" {
+		ok, err := visible(ctx, p)
+		if ok {
 			return p, nil
 		}
+		stuck = stuck || errors.Is(err, context.DeadlineExceeded)
+	}
+	if stuck {
+		return nil, errors.New("a browser tab does not respond, perhaps because of a dialog: take a screenshot and use computer_key, or close it with browser_close_tab")
 	}
 	if first == nil {
 		return nil, errors.New("could not attach to any tab")
 	}
 	return first, nil
+}
+
+func visible(ctx context.Context, p *cdp.Page) (bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, tabProbeTimeout)
+	defer cancel()
+	var state string
+	if err := p.EvalIsolated(ctx, "document.visibilityState", &state); err != nil {
+		return false, err
+	}
+	return state == "visible", nil
 }
 
 // retry runs fn, reconnecting once if the connection was lost (Chromium
@@ -307,7 +326,7 @@ func (b *Browser) Current(ctx context.Context) (Tab, error) {
 	var tab Tab
 	err := b.withActive(ctx, func(_ *cdp.Conn, p *cdp.Page) error {
 		var v struct{ Title, URL string }
-		if err := p.Eval(ctx, `({Title: document.title, URL: location.href})`, &v); err != nil {
+		if err := p.EvalIsolated(ctx, `({Title: document.title, URL: location.href})`, &v); err != nil {
 			return err
 		}
 		tab = Tab{ID: p.TargetID, Title: v.Title, URL: v.URL, Active: true}
@@ -365,15 +384,24 @@ func (b *Browser) CloseTab(ctx context.Context, id string) error {
 	})
 }
 
-// readPageJS numbers the visible interactive elements (data-kivora-id) and
-// returns the page text. %d is the maximum text length.
+// readPageJS numbers the visible interactive elements and returns the page
+// text. %d is the maximum text length. The numbers live in the isolated world:
+// the page can neither see them nor give them to other elements.
 const readPageJS = `(() => {
   const maxText = %d;
+  const kivora = globalThis.kivora ??= {
+    elements: new Map(),
+    secrets: new WeakSet(),
+    get(id) {
+      const el = this.elements.get(id);
+      return el && el.isConnected ? el : null;
+    },
+  };
+  kivora.elements.clear();
   const visible = el => {
     const r = el.getBoundingClientRect(), s = getComputedStyle(el);
     return r.width > 0 && r.height > 0 && s.visibility !== "hidden" && s.display !== "none";
   };
-  document.querySelectorAll("[data-kivora-id]").forEach(e => e.removeAttribute("data-kivora-id"));
   const sel = 'a[href], button, input:not([type=hidden]), select, textarea, summary, [contenteditable=""], ' +
     '[contenteditable=true], [role=button], [role=link], [role=checkbox], [role=radio], [role=tab], ' +
     '[role=menuitem], [role=option], [role=switch], [role=combobox], [role=searchbox], [role=textbox]';
@@ -382,10 +410,10 @@ const readPageJS = `(() => {
     if (elements.length >= 400) break;
     if (!visible(el)) continue;
     const id = elements.length + 1;
-    el.setAttribute("data-kivora-id", id);
+    kivora.elements.set(id, el);
     // Never return what is typed in a password field or a field filled
     // from the secrets store.
-    const hidden = el.type === "password" || el.hasAttribute("data-kivora-secret");
+    const hidden = el.type === "password" || kivora.secrets.has(el);
     const value = hidden ? "" : el.value;
     const label = (el.getAttribute("aria-label") || el.innerText || value || el.placeholder ||
       el.title || el.alt || el.name || "").replace(/\s+/g, " ").trim().slice(0, 120);
@@ -402,7 +430,7 @@ const readPageJS = `(() => {
 func (b *Browser) ReadPage(ctx context.Context, maxChars int) (Page, error) {
 	var page Page
 	err := b.withWebPage(ctx, func(p *cdp.Page) error {
-		return p.Eval(ctx, fmt.Sprintf(readPageJS, maxChars), &page)
+		return p.EvalIsolated(ctx, fmt.Sprintf(readPageJS, maxChars), &page)
 	})
 	return page, err
 }
@@ -413,7 +441,7 @@ func (b *Browser) ReadPage(ctx context.Context, maxChars int) (Page, error) {
 func (b *Browser) withWebPage(ctx context.Context, fn func(*cdp.Page) error) error {
 	return b.withActive(ctx, func(_ *cdp.Conn, p *cdp.Page) error {
 		var href string
-		if err := p.Eval(ctx, "location.href", &href); err != nil {
+		if err := p.EvalIsolated(ctx, "location.href", &href); err != nil {
 			return err
 		}
 		if !isWebPage(href) {
@@ -441,7 +469,7 @@ func isWebPage(rawURL string) bool {
 }
 
 const elementCenterJS = `(() => {
-  const el = document.querySelector('[data-kivora-id="%d"]');
+  const el = globalThis.kivora?.get(%d);
   if (!el) return null;
   el.scrollIntoView({block: "center", inline: "center"});
   const r = el.getBoundingClientRect();
@@ -452,7 +480,7 @@ const elementCenterJS = `(() => {
 func (b *Browser) ClickElement(ctx context.Context, id int) (Tab, error) {
 	err := b.withActive(ctx, func(_ *cdp.Conn, p *cdp.Page) error {
 		var pt *struct{ X, Y float64 }
-		if err := p.Eval(ctx, fmt.Sprintf(elementCenterJS, id), &pt); err != nil {
+		if err := p.EvalIsolated(ctx, fmt.Sprintf(elementCenterJS, id), &pt); err != nil {
 			return err
 		}
 		if pt == nil {
@@ -495,10 +523,10 @@ func (b *Browser) Type(ctx context.Context, id int, text string, clear, submit b
 	err := b.withActive(ctx, func(_ *cdp.Conn, p *cdp.Page) error {
 		target := "document.activeElement"
 		if id > 0 {
-			target = fmt.Sprintf(`document.querySelector('[data-kivora-id="%d"]')`, id)
+			target = fmt.Sprintf(`globalThis.kivora?.get(%d)`, id)
 		}
 		var ok bool
-		if err := p.Eval(ctx, fmt.Sprintf(focusJS, target, clear), &ok); err != nil {
+		if err := p.EvalIsolated(ctx, fmt.Sprintf(focusJS, target, clear), &ok); err != nil {
 			return err
 		}
 		if !ok {
@@ -531,7 +559,7 @@ func (b *Browser) Type(ctx context.Context, id int, text string, clear, submit b
 }
 
 const secretTargetJS = `(() => {
-  const el = document.querySelector('[data-kivora-id="%d"]');
+  const el = globalThis.kivora?.get(%d);
   if (!el) return {ok: false, why: "element not found; call browser_read_page again"};
   if (el.tagName !== "INPUT") return {ok: false, why: "element is not an input field"};
   return {ok: true, url: location.href};
@@ -545,7 +573,7 @@ const secretTargetJS = `(() => {
 // value setter and input events, which frameworks such as React listen to.
 const secretFillJS = `((origin, id, kind, value) => {
   if (location.origin !== origin) return "page";
-  const el = document.querySelector('[data-kivora-id="' + id + '"]');
+  const el = globalThis.kivora?.get(id);
   if (!el || el.tagName !== "INPUT") return "page";
   const hints = [el.autocomplete, el.name, el.id, el.getAttribute("aria-label"), el.placeholder].join(" ");
   const allowed = el.type === "password" || (kind === "text" && (el.type === "email" ||
@@ -553,7 +581,7 @@ const secretFillJS = `((origin, id, kind, value) => {
   if (!allowed) return "field";
   el.scrollIntoView({block: "center"});
   el.focus();
-  el.setAttribute("data-kivora-secret", "");
+  globalThis.kivora.secrets.add(el);
   el.style.setProperty("-webkit-text-security", "disc", "important");
   Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set.call(el, value);
   el.dispatchEvent(new Event("input", {bubbles: true}));
@@ -574,7 +602,7 @@ func (b *Browser) FillSecret(ctx context.Context, id int, valueFor func(pageURL 
 			Why string `json:"why"`
 			URL string `json:"url"`
 		}
-		if err := p.Eval(ctx, fmt.Sprintf(secretTargetJS, id), &res); err != nil {
+		if err := p.EvalIsolated(ctx, fmt.Sprintf(secretTargetJS, id), &res); err != nil {
 			return err
 		}
 		if !res.OK {
@@ -586,7 +614,7 @@ func (b *Browser) FillSecret(ctx context.Context, id int, valueFor func(pageURL 
 		}
 		var status string
 		script := fmt.Sprintf(secretFillJS, jsString(grant.Origin), id, jsString(grant.Field), jsString(grant.Value))
-		if err := p.Eval(ctx, script, &status); err != nil {
+		if err := p.EvalIsolated(ctx, script, &status); err != nil {
 			return errors.New("could not fill the field") // never echo the script: it holds the value
 		}
 		switch status {
@@ -615,7 +643,7 @@ func (b *Browser) WaitForText(ctx context.Context, text string, timeout time.Dur
 	js := fmt.Sprintf(`document.body ? document.body.innerText.includes(%s) : false`, jsString(text))
 	for {
 		var found bool
-		err := b.withWebPage(ctx, func(p *cdp.Page) error { return p.Eval(ctx, js, &found) })
+		err := b.withWebPage(ctx, func(p *cdp.Page) error { return p.EvalIsolated(ctx, js, &found) })
 		if err == nil && found {
 			return nil
 		}
@@ -655,22 +683,8 @@ func (b *Browser) Download(ctx context.Context, rawURL string, limit int64) (io.
 	if err != nil {
 		return nil, "", err
 	}
-	var cookies []struct{ Name, Value string }
 	var ua string
-	err = b.withActive(ctx, func(conn *cdp.Conn, p *cdp.Page) error {
-		var res struct {
-			Cookies []struct {
-				Name  string `json:"name"`
-				Value string `json:"value"`
-			} `json:"cookies"`
-		}
-		if err := p.Call(ctx, "Network.getCookies", map[string]any{"urls": []string{u}}, &res); err != nil {
-			return err
-		}
-		cookies = cookies[:0]
-		for _, c := range res.Cookies {
-			cookies = append(cookies, struct{ Name, Value string }{c.Name, c.Value})
-		}
+	err = b.retry(ctx, func(conn *cdp.Conn) error {
 		var v struct {
 			UserAgent string `json:"userAgent"`
 		}
@@ -689,10 +703,16 @@ func (b *Browser) Download(ctx context.Context, rawURL string, limit int64) (io.
 		return nil, "", err
 	}
 	req.Header.Set("User-Agent", ua)
-	for _, c := range cookies {
-		req.AddCookie(&http.Cookie{Name: c.Name, Value: c.Value})
+	if err := b.addCookies(ctx, req); err != nil {
+		return nil, "", err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	client := &http.Client{Transport: downloadTransport, CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 10 {
+			return errors.New("stopped after 10 redirects")
+		}
+		return b.addCookies(ctx, req)
+	}}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, "", err
 	}
@@ -705,6 +725,66 @@ func (b *Browser) Download(ctx context.Context, rawURL string, limit int64) (io.
 		return nil, "", fmt.Errorf("file is %d bytes, over the %d byte limit", resp.ContentLength, limit)
 	}
 	return resp.Body, suggestName(resp, u), nil
+}
+
+// addCookies gives req the browser's cookies for its URL, and no others: at
+// each redirect, the new site gets its own, and an http URL no secure ones.
+func (b *Browser) addCookies(ctx context.Context, req *http.Request) error {
+	var res struct {
+		Cookies []struct {
+			Name  string `json:"name"`
+			Value string `json:"value"`
+		} `json:"cookies"`
+	}
+	err := b.withActive(ctx, func(_ *cdp.Conn, p *cdp.Page) error {
+		return p.Call(ctx, "Network.getCookies", map[string]any{"urls": []string{req.URL.String()}}, &res)
+	})
+	if err != nil {
+		return err
+	}
+	req.Header.Del("Cookie")
+	for _, c := range res.Cookies {
+		req.AddCookie(&http.Cookie{Name: c.Name, Value: c.Value})
+	}
+	return nil
+}
+
+// downloadTransport never connects to this computer: downloads run as the
+// desktop account, which reaches services that web pages and the worker must
+// not reach. Private networks are left to the filter on the host, which knows
+// the allowed exceptions. The check sees the address after name resolution and
+// applies to redirects too.
+var downloadTransport = &http.Transport{
+	DialContext:         (&net.Dialer{Timeout: 30 * time.Second, Control: refuseLocal}).DialContext,
+	TLSHandshakeTimeout: 30 * time.Second,
+	ForceAttemptHTTP2:   true,
+}
+
+func refuseLocal(_, address string, _ syscall.RawConn) error {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return err
+	}
+	if ip := net.ParseIP(host); ip == nil || isLocalIP(ip) {
+		return fmt.Errorf("refused: %s is an address of this computer", host)
+	}
+	return nil
+}
+
+func isLocalIP(ip net.IP) bool {
+	if ip.IsLoopback() || ip.IsUnspecified() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() {
+		return true
+	}
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return true
+	}
+	for _, addr := range addrs {
+		if n, ok := addr.(*net.IPNet); ok && n.IP.Equal(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 func suggestName(resp *http.Response, rawURL string) string {
@@ -725,7 +805,7 @@ func waitLoaded(ctx context.Context, p *cdp.Page) error {
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
 		var state string
-		if err := p.Eval(ctx, "document.readyState", &state); err == nil && state == "complete" {
+		if err := p.EvalIsolated(ctx, "document.readyState", &state); err == nil && state == "complete" {
 			return nil
 		}
 		select {

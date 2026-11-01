@@ -8,9 +8,15 @@
   host to the VM (SSH) keep working because only NEW outgoing traffic is
   dropped.
 
-  @GATEWAY@ is replaced by the libvirt network gateway address.
+  clean-traffic keeps the VM from taking the MAC or IP address of the gateway
+  or of another VM, and drops everything but IPv4 and ARP, IPv6 included.
+
+  @NWFILTER@ is replaced by the name of the filter, and @GATEWAY@ by the libvirt
+  network gateway address.
 -->
-<filter name='kivoradesk-no-lan' chain='root'>
+<filter name='@NWFILTER@' chain='root'>
+  <filterref filter='clean-traffic'/>
+
   <rule action='accept' direction='out' priority='100'>
     <udp dstipaddr='@GATEWAY@' dstportstart='53'/>
   </rule>

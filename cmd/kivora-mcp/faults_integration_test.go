@@ -176,7 +176,7 @@ func TestBrowserLockdown(t *testing.T) {
 	id := regexp.MustCompile(`Tab (\S+):`).FindStringSubmatch(out)[1]
 	t.Cleanup(func() { e.call("browser_close_tab", map[string]any{"id": id}, false) })
 
-	for _, u := range []string{"file:///etc/passwd", "chrome://version", "view-source:https://example.com"} {
+	for _, u := range []string{"file:///etc/passwd", "chrome://version", "view-source:https://example.com", "http://127.0.0.1:9222/json/version"} {
 		e.call("computer_key", map[string]any{"keys": "ctrl+l"}, false)
 		e.call("computer_type", map[string]any{"text": u + "\n"}, false)
 		time.Sleep(time.Second)
@@ -236,4 +236,55 @@ func TestControlSurvivesGatewayRestart(t *testing.T) {
 	}
 	out, _ := e.call("computer_click", map[string]any{"x": 10, "y": 10}, true)
 	e.mustContain(out, "not under agent control")
+}
+
+// TestDownloadStaysOffThisComputer checks that the download tool, which runs as
+// the desktop account, does not reach the local services.
+func TestDownloadStaysOffThisComputer(t *testing.T) {
+	e := setupHost(t)
+	for _, u := range []string{"http://127.0.0.1:9222/json/list", "http://localhost:6080/", "http://[::1]:5900/"} {
+		out, _ := e.call("browser_download", map[string]any{"url": u}, true)
+		e.mustContain(out, "refused")
+	}
+}
+
+// TestBackgroundTabCannotPoseAsVisible opens a page claiming to be visible, then
+// another tab: the tools must keep working on the tab really on screen.
+func TestBackgroundTabCannotPoseAsVisible(t *testing.T) {
+	e := setupHost(t)
+	out, _ := e.call("browser_new_tab", nil, false)
+	id := regexp.MustCompile(`Tab (\S+):`).FindStringSubmatch(out)[1]
+	t.Cleanup(func() { e.call("browser_close_tab", map[string]any{"id": id}, false) })
+	e.call("computer_key", map[string]any{"keys": "ctrl+l"}, false)
+	e.call("computer_type", map[string]any{"text": `data:text/html,<title>poser</title><script>Object.defineProperty(document,"visibilityState",{get:()=>"visible"})</script>poser` + "\n"}, false)
+	time.Sleep(time.Second)
+	page, _ := e.call("browser_read_page", nil, false)
+	e.mustContain(page, "poser")
+
+	out, _ = e.call("browser_new_tab", map[string]any{"url": "https://example.com"}, false)
+	id2 := regexp.MustCompile(`Tab (\S+):`).FindStringSubmatch(out)[1]
+	t.Cleanup(func() { e.call("browser_close_tab", map[string]any{"id": id2}, false) })
+	for range 3 {
+		page, _ = e.call("browser_read_page", nil, false)
+		e.mustContain(page, "Example Domain")
+	}
+	tabs, _ := e.call("browser_tabs", nil, false)
+	if strings.Count(tabs, `"active": true`) != 1 {
+		t.Fatalf("more than one tab claims to be on screen:\n%s", tabs)
+	}
+}
+
+// TestWorkerProcessesEndWithTheirCall checks that nothing the agent runs
+// outlives its call, even detached, and that the limits apply.
+func TestWorkerProcessesEndWithTheirCall(t *testing.T) {
+	e := setupHost(t)
+	out, _ := e.call("shell_run", map[string]any{"command": "(setsid nohup sleep 271 >/dev/null 2>&1 &); id -un; ulimit -u; ulimit -v; cat /proc/self/oom_score_adj; touch kivora-e2e-file; ls -l kivora-e2e-file; rm kivora-e2e-file"}, false)
+	e.mustContain(out, "worker")
+	e.mustContain(out, "512")
+	e.mustContain(out, "1000")
+	e.mustContain(out, "exit code 0")
+	out, _ = e.call("shell_run", map[string]any{"command": "ps -o args | grep -c '[s]leep 271'; true"}, false)
+	if !regexp.MustCompile(`(?m)^0$`).MatchString(out) {
+		t.Fatalf("a detached process outlived its call:\n%s", out)
+	}
 }

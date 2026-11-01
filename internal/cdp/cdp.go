@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 
 	"github.com/coder/websocket"
@@ -162,6 +163,9 @@ type Page struct {
 	conn      *Conn
 	TargetID  string
 	SessionID string
+
+	mu    sync.Mutex
+	world int // execution context of EvalIsolated, 0 until created
 }
 
 // NewPage opens a new tab, attaches to it, then navigates to url. Creating
@@ -226,6 +230,62 @@ func (p *Page) Call(ctx context.Context, method string, params, out any) error {
 // Eval evaluates a JavaScript expression in the page and decodes its value
 // into out if out is non-nil.
 func (p *Page) Eval(ctx context.Context, expr string, out any) error {
+	return p.evalIn(ctx, 0, expr, out)
+}
+
+// EvalIsolated evaluates a JavaScript expression in a world of its own. It
+// shares the DOM with the page but not its JavaScript: what the page overrides,
+// such as document.visibilityState, does not apply, and what the expression
+// keeps in globalThis stays out of the page's reach until the next navigation.
+func (p *Page) EvalIsolated(ctx context.Context, expr string, out any) error {
+	for attempt := 0; ; attempt++ {
+		world, err := p.isolatedWorld(ctx)
+		if err != nil {
+			return err
+		}
+		err = p.evalIn(ctx, world, expr, out)
+		if err == nil || attempt == 1 || !strings.Contains(err.Error(), "Cannot find context") {
+			return err
+		}
+		// A navigation ended the world.
+		p.mu.Lock()
+		p.world = 0
+		p.mu.Unlock()
+	}
+}
+
+func (p *Page) isolatedWorld(ctx context.Context) (int, error) {
+	p.mu.Lock()
+	world := p.world
+	p.mu.Unlock()
+	if world != 0 {
+		return world, nil
+	}
+	var tree struct {
+		FrameTree struct {
+			Frame struct {
+				ID string `json:"id"`
+			} `json:"frame"`
+		} `json:"frameTree"`
+	}
+	if err := p.Call(ctx, "Page.getFrameTree", nil, &tree); err != nil {
+		return 0, err
+	}
+	var created struct {
+		ID int `json:"executionContextId"`
+	}
+	params := map[string]any{"frameId": tree.FrameTree.Frame.ID, "worldName": "kivora"}
+	if err := p.Call(ctx, "Page.createIsolatedWorld", params, &created); err != nil {
+		return 0, err
+	}
+	p.mu.Lock()
+	p.world = created.ID
+	p.mu.Unlock()
+	return created.ID, nil
+}
+
+// evalIn evaluates in an execution context, or the page's own if it is 0.
+func (p *Page) evalIn(ctx context.Context, contextID int, expr string, out any) error {
 	var res struct {
 		Result struct {
 			Value json.RawMessage `json:"value"`
@@ -238,6 +298,9 @@ func (p *Page) Eval(ctx context.Context, expr string, out any) error {
 		} `json:"exceptionDetails"`
 	}
 	params := map[string]any{"expression": expr, "returnByValue": true, "awaitPromise": true}
+	if contextID != 0 {
+		params["contextId"] = contextID
+	}
 	if err := p.Call(ctx, "Runtime.evaluate", params, &res); err != nil {
 		return err
 	}
