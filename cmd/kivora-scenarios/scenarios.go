@@ -555,7 +555,11 @@ var scenarios = []scenario{
 		if err != nil {
 			return err
 		}
-		return contains(echo, value)
+		if strings.Contains(echo, value) {
+			return fmt.Errorf("secret value reached the model after the submit")
+		}
+		// httpbin echoes the submitted form: the site got it, the model did not.
+		return contains(echo, "[secret scenario-secret hidden]")
 	}},
 	{name: "chromium_crash", host: true, run: func(r *runner) error {
 		if _, err := r.script("", "ssh.sh", "doas pkill -KILL -f '[/]usr/lib/chromium/chromium'"); err != nil {

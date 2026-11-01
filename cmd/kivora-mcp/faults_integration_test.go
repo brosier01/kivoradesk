@@ -149,10 +149,12 @@ func TestSecretNeverReachesTheModel(t *testing.T) {
 	out, _ = e.call("browser_read_page", map[string]any{"max_chars": 100000}, false)
 	leaks(out)
 
-	// The site received it: httpbin echoes the submitted form.
+	// The site received it, as httpbin echoes the submitted form, but the model
+	// does not see it there either.
 	e.call("browser_click", map[string]any{"element": element(t, page, `button "Submit order"`)}, false)
 	echo, _ := e.call("browser_read_page", nil, false)
-	e.mustContain(echo, value)
+	leaks(echo)
+	e.mustContain(echo, "[secret e2e-secret hidden]")
 
 	// The browser's account cannot read the store.
 	if status := strings.TrimSpace(admin(t, "doas -u agent cat /var/lib/kivora-vault/secrets.json >/dev/null 2>&1; echo $?")); status == "0" {

@@ -27,6 +27,8 @@ type server struct {
 	vault *secrets.Client
 	audit *auditLog
 
+	filled scrubber // credentials filled so far, hidden from every result
+
 	mu sync.Mutex // one acting tool at a time
 }
 
@@ -61,9 +63,17 @@ func add[In any](srv *mcp.Server, s *server, k kind, tool *mcp.Tool, h handler[I
 		if err != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			err = fmt.Errorf("%s timed out after %v: %v", tool.Name, limit, err)
 		}
+		if err != nil {
+			err = errors.New(s.filled.clean(err.Error()))
+		}
 		s.audit.record(trace, tool.Name, in, err, time.Since(start))
 		if err != nil {
 			return nil, nil, fmt.Errorf("%v [trace %s]", err, trace)
+		}
+		for _, c := range content {
+			if t, ok := c.(*mcp.TextContent); ok {
+				t.Text = s.filled.clean(t.Text)
+			}
 		}
 		return &mcp.CallToolResult{Content: content}, nil, nil
 	})

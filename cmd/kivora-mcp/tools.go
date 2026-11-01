@@ -514,7 +514,11 @@ func (s *server) registerSecrets(srv *mcp.Server) {
 		Description: "Fill a stored credential into a field of the visible page without revealing it. Refused unless the page is on one of the credential's sites and the field suits the credential: password fields for \"password\" credentials, also login, email and one-time code fields for \"text\" ones. Submit the form yourself afterwards."},
 		func(ctx context.Context, in fillIn) ([]mcp.Content, error) {
 			tab, err := s.br.FillSecret(ctx, in.Element, func(pageURL string) (secrets.Grant, error) {
-				return s.vault.ValueFor(ctx, in.Name, pageURL)
+				grant, err := s.vault.ValueFor(ctx, in.Name, pageURL)
+				if err == nil {
+					s.filled.remember(in.Name, grant.Value)
+				}
+				return grant, err
 			})
 			if err != nil {
 				return nil, err
