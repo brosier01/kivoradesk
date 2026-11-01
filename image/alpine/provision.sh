@@ -161,6 +161,11 @@ cp -R rootfs/. /
 chmod 0755 /etc/init.d/kivora-* /usr/local/bin/kivora-*
 chmod 0400 /etc/doas.d/*.conf
 doas -C /etc/doas.d/kivora-mcp.conf
+# OpenRC compares its dependency cache with the scripts to the second: a
+# cache rebuilt in the second the scripts were copied looks current without
+# them, is saved at shutdown and leaves the services stopped at the next
+# boot. Rebuild it now.
+rc-update -u >/dev/null
 rc-service sshd reload >/dev/null
 
 # Stop in reverse order, then start in order: restarting the display alone
