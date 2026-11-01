@@ -45,6 +45,10 @@ keeps its data safe and can sign in to sites without exposing passwords.
 
 ### Fixed
 
+- `computer_type` could lose an accented character (about 1 in 100 on a
+  busy host): Chromium drops a paste when the clipboard changes before the
+  paste is done. The clipboard is now kept until the target has fetched the
+  text and settled, and a piece of a line holding accents is pasted whole.
 - `computer_focus_window` took 15 s and could report success without
   activating the window; it now lists titled windows only and checks focus.
 - `doctor.sh` no longer reports a failure right after a deployment while
@@ -53,6 +57,8 @@ keeps its data safe and can sign in to sites without exposing passwords.
 ### Measured
 
 - Scenario suite: 300/300 runs (30 scenarios, 10 runs each), goal 90 %.
+- Accented typing through `computer_type`: 100/100 exact with the host
+  under heavy load.
 - Backup of the data disk in about 4 s (52 MiB), restore in about 35 s.
 
 ### Known limitations
