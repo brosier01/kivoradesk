@@ -400,10 +400,43 @@ const readPageJS = `(() => {
 // ReadPage returns the active tab's text and numbered interactive elements.
 func (b *Browser) ReadPage(ctx context.Context, maxChars int) (Page, error) {
 	var page Page
-	err := b.withActive(ctx, func(_ *cdp.Conn, p *cdp.Page) error {
+	err := b.withWebPage(ctx, func(p *cdp.Page) error {
 		return p.Eval(ctx, fmt.Sprintf(readPageJS, maxChars), &page)
 	})
 	return page, err
+}
+
+// withWebPage runs fn on the active tab if its content may go back to the
+// model. The browser policies already block local files and browser pages;
+// this holds if they are missing.
+func (b *Browser) withWebPage(ctx context.Context, fn func(*cdp.Page) error) error {
+	return b.withActive(ctx, func(_ *cdp.Conn, p *cdp.Page) error {
+		var href string
+		if err := p.Eval(ctx, "location.href", &href); err != nil {
+			return err
+		}
+		if !isWebPage(href) {
+			return fmt.Errorf("refused: %s is not a web page", href)
+		}
+		return fn(p)
+	})
+}
+
+// isWebPage reports whether rawURL is a page from the web, or empty.
+func isWebPage(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	switch u.Scheme {
+	case "http", "https", "data":
+		return true
+	case "about":
+		return u.Opaque == "blank" || u.Opaque == "srcdoc"
+	case "blob":
+		return strings.HasPrefix(u.Opaque, "http:") || strings.HasPrefix(u.Opaque, "https:")
+	}
+	return false
 }
 
 const elementCenterJS = `(() => {
@@ -568,7 +601,7 @@ func (b *Browser) WaitForText(ctx context.Context, text string, timeout time.Dur
 	js := fmt.Sprintf(`document.body ? document.body.innerText.includes(%s) : false`, jsString(text))
 	for {
 		var found bool
-		err := b.withActive(ctx, func(_ *cdp.Conn, p *cdp.Page) error { return p.Eval(ctx, js, &found) })
+		err := b.withWebPage(ctx, func(p *cdp.Page) error { return p.Eval(ctx, js, &found) })
 		if err == nil && found {
 			return nil
 		}
@@ -583,7 +616,7 @@ func (b *Browser) WaitForText(ctx context.Context, text string, timeout time.Dur
 // PDF prints the active tab to PDF.
 func (b *Browser) PDF(ctx context.Context) ([]byte, Tab, error) {
 	var data []byte
-	err := b.withActive(ctx, func(_ *cdp.Conn, p *cdp.Page) error {
+	err := b.withWebPage(ctx, func(p *cdp.Page) error {
 		var res struct {
 			Data string `json:"data"`
 		}

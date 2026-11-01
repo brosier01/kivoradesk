@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -143,4 +144,25 @@ func TestSecretNeverReachesTheModel(t *testing.T) {
 	if n := strings.TrimSpace(admin(t, "doas grep -rc "+value+" /home/agent/.local/state/kivora/audit | grep -v ':0$' | wc -l")); n != "0" {
 		t.Fatalf("secret value found in %s audit file(s)", n)
 	}
+}
+
+// TestBrowserLockdown checks that local files and browser pages opened from
+// the address bar never reach the model, and that the tools keep working.
+func TestBrowserLockdown(t *testing.T) {
+	e := setupHost(t)
+	out, _ := e.call("browser_new_tab", map[string]any{"url": "https://example.com"}, false)
+	id := regexp.MustCompile(`Tab (\S+):`).FindStringSubmatch(out)[1]
+	t.Cleanup(func() { e.call("browser_close_tab", map[string]any{"id": id}, false) })
+
+	for _, u := range []string{"file:///etc/passwd", "chrome://version", "view-source:https://example.com"} {
+		e.call("computer_key", map[string]any{"keys": "ctrl+l"}, false)
+		e.call("computer_type", map[string]any{"text": u + "\n"}, false)
+		time.Sleep(time.Second)
+		out, _ = e.call("browser_read_page", nil, true)
+		e.mustContain(out, "not a web page")
+	}
+
+	e.call("browser_navigate", map[string]any{"url": "https://example.com"}, false)
+	page, _ := e.call("browser_read_page", nil, false)
+	e.mustContain(page, "Example Domain")
 }

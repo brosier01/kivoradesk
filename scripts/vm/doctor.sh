@@ -40,6 +40,7 @@ done
 for mnt in /data /home/agent /workspace; do
 	mountpoint -q "$mnt" && echo "ok mount $mnt" || echo "fail mount $mnt is not mounted"
 done
+[ -f /etc/chromium/policies/managed/kivora.json ] && echo "ok browser policies installed" || echo "fail browser policies are missing"
 df -P /workspace / | awk 'NR > 1 { pct = $5 + 0; msg = sprintf("disk %s %d%% used, %d MiB free", $6, pct, $4 / 1024);
 	print (pct >= 90 ? "warn " : "ok ") msg }'
 free -m | awk '/^Mem:/ { print "ok memory " $3 " MiB used, " $7 " MiB available" }'

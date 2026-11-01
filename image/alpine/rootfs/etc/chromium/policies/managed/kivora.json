@@ -1,0 +1,23 @@
+{
+  "URLBlocklist": [
+    "file://*",
+    "chrome://*",
+    "chrome-search://*",
+    "devtools://*",
+    "chrome-devtools://*",
+    "view-source:*",
+    "javascript://*"
+  ],
+  "URLAllowlist": [
+    "chrome://newtab",
+    "chrome://new-tab-page"
+  ],
+  "ExtensionInstallBlocklist": ["*"],
+  "AllowFileSelectionDialogs": false,
+  "DownloadRestrictions": 3,
+  "PasswordManagerEnabled": false,
+  "AutofillAddressEnabled": false,
+  "AutofillCreditCardEnabled": false,
+  "BrowserSignin": 0,
+  "SyncDisabled": true
+}

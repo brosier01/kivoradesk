@@ -160,6 +160,8 @@ log "installing services"
 cp -R rootfs/. /
 chmod 0755 /etc/init.d/kivora-* /usr/local/bin/kivora-*
 chmod 0400 /etc/doas.d/*.conf
+chmod 0755 /etc/chromium/policies /etc/chromium/policies/managed
+chmod 0644 /etc/chromium/policies/managed/*.json
 doas -C /etc/doas.d/kivora-mcp.conf
 # OpenRC compares its dependency cache with the scripts to the second: a
 # cache rebuilt in the second the scripts were copied looks current without
