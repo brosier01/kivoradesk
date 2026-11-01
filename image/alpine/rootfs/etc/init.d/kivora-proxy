@@ -1,0 +1,26 @@
+#!/sbin/openrc-run
+# The only way out of the VM for the agent's shell commands, to the sites the
+# human allowed (scripts/vm/shell-allow.sh).
+
+description="KivoraDesk shell network proxy"
+
+. /etc/conf.d/kivoradesk
+
+supervisor=supervise-daemon
+command=/usr/local/bin/kivora-proxy
+command_args="-listen 127.0.0.1:$KIVORA_PROXY_PORT"
+command_user="kivora-proxy:kivora-proxy"
+respawn_delay=2
+# Restart after crashes, giving up only on a crash loop (5 within a minute).
+respawn_max=5
+respawn_period=60
+output_log=/var/log/kivora-proxy.log
+error_log=/var/log/kivora-proxy.log
+
+depend() {
+	need net kivora-firewall
+}
+
+start_pre() {
+	checkpath -f -o kivora-proxy:kivora-proxy -m 0640 /var/log/kivora-proxy.log
+}

@@ -15,7 +15,7 @@ mkdir -p "$stage/rootfs/usr/local/bin"
 
 log "building guest binaries"
 version=$(git -C "$REPO_ROOT" describe --always --dirty 2>/dev/null || echo dev)
-for cmd in kivora-web kivora-mcp kivora-vault kivora-audit; do
+for cmd in kivora-web kivora-mcp kivora-vault kivora-audit kivora-proxy; do
 	(cd "$REPO_ROOT" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
 		go build -trimpath -ldflags="-s -w -X main.version=$version" -o "$stage/rootfs/usr/local/bin/$cmd" "./cmd/$cmd")
 done

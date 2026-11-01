@@ -27,10 +27,14 @@ KEYS_DIR=/etc/ssh/authorized_keys
 AUDIT_USER=${AUDIT_USER:-kivora-audit}
 AUDIT_UID=${AUDIT_UID:-1103}
 AUDIT_DIR=/var/lib/kivora-audit
+# The proxy of the agent's shell commands. Its list stays on the data disk, and
+# only root changes it.
+PROXY_USER=${PROXY_USER:-kivora-proxy}
+PROXY_DIR=/var/lib/kivora-proxy
 WORKSPACE=${WORKSPACE:-/workspace}
 DATA_DIR=/data
 DATA_SERIAL=kivora-data
-SERVICES="kivora-hidepid kivora-firewall kivora-display kivora-wm kivora-browser kivora-vnc kivora-web"
+SERVICES="kivora-hidepid kivora-firewall kivora-proxy kivora-display kivora-wm kivora-browser kivora-vnc kivora-web"
 
 log() { printf '==> %s\n' "$*" >&2; }
 
@@ -141,7 +145,12 @@ if ! id "$AUDIT_USER" >/dev/null 2>&1; then
 	log "creating unprivileged user $AUDIT_USER"
 	adduser -D -H -u "$AUDIT_UID" -h "$AUDIT_DIR" -s /sbin/nologin -g "KivoraDesk audit log" "$AUDIT_USER"
 fi
-mkdir -p "$VAULT_DIR" "$KEYS_DIR" "$AUDIT_DIR"
+if ! id "$PROXY_USER" >/dev/null 2>&1; then
+	log "creating system user $PROXY_USER"
+	adduser -S -D -H -G "$PROXY_USER" -h /nonexistent -s /sbin/nologin "$PROXY_USER" 2>/dev/null ||
+		{ addgroup -S "$PROXY_USER"; adduser -S -D -H -G "$PROXY_USER" -h /nonexistent -s /sbin/nologin "$PROXY_USER"; }
+fi
+mkdir -p "$VAULT_DIR" "$KEYS_DIR" "$AUDIT_DIR" "$PROXY_DIR"
 
 disk=$(data_disk)
 if [ -n "$disk" ]; then
@@ -164,6 +173,7 @@ if [ -n "$disk" ]; then
 	bind_to_data "$VAULT_DIR"
 	bind_to_data "$KEYS_DIR"
 	bind_to_data "$AUDIT_DIR"
+	bind_to_data "$PROXY_DIR"
 else
 	log "no data disk (serial $DATA_SERIAL): keeping data on the system disk"
 fi
@@ -226,6 +236,13 @@ fi
 [ -e "$new_keys" ] || : >"$new_keys"
 chown "root:$AGENT_USER" "$new_keys"
 chmod 0640 "$new_keys"
+
+# Nothing is allowed until the human says so.
+chown root:root "$PROXY_DIR"
+chmod 0755 "$PROXY_DIR"
+[ -e "$PROXY_DIR/allowlist" ] || : >"$PROXY_DIR/allowlist"
+chown root:root "$PROXY_DIR/allowlist"
+chmod 0644 "$PROXY_DIR/allowlist"
 
 log "preparing $WORKSPACE"
 mkdir -p "$WORKSPACE"

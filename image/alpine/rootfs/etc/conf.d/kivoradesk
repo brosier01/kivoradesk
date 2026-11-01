@@ -23,3 +23,7 @@ KIVORA_VNC_PORT="5900"
 
 # Web gateway port, bound to localhost only; reach it through an SSH tunnel.
 KIVORA_WEB_PORT="6080"
+
+# Port of the proxy of the agent's shell commands, bound to localhost only.
+# Also set in /etc/kivoradesk/firewall.nft and internal/worker.
+KIVORA_PROXY_PORT="3128"
