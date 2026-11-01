@@ -78,6 +78,10 @@ for svc in cloud-final cloud-config cloud-init cloud-init-hotplugd cloud-init-lo
 	rc-update -a del "$svc" >/dev/null 2>&1 || true
 done
 
+# The VM's address is reserved for its MAC on the libvirt network: skip the
+# ARP probe for conflicts, which holds every service back for 5 s at boot.
+grep -qx noarp /etc/dhcpcd.conf 2>/dev/null || echo noarp >>/etc/dhcpcd.conf
+
 # Boot without waiting at the boot menu.
 [ -f /boot/limine/limine.conf ] && sed -i 's/^timeout: .*/timeout: 1/' /boot/limine/limine.conf
 
