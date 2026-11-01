@@ -277,6 +277,9 @@ ssh -N kivoradesk          # keeps the tunnel open
 open "http://localhost:6080/?token=…"   # the URL from web-url.sh, once
 ```
 
+The input owner survives a restart of the gateway or of the VM: if the agent did
+not own the desktop, it stays paused until you hand control back.
+
 The token is stored in a strict same-site cookie. The gateway also rejects
 non-loopback `Host` headers and cross-origin control requests.
 

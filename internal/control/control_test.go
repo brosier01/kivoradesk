@@ -81,3 +81,13 @@ func TestParseOwner(t *testing.T) {
 		t.Error(`ParseOwner("root") succeeded`)
 	}
 }
+
+func TestRestoreNeverHandsControlToTheAgent(t *testing.T) {
+	cases := map[Owner]Owner{Agent: Agent, Paused: Paused, Human: Paused, "nonsense": Paused, "": Paused}
+	for saved, want := range cases {
+		snap := Restore(Snapshot{Owner: saved, Seq: 41, Request: "log in"}).Get()
+		if snap.Owner != want || snap.Seq != 42 || snap.Request != "log in" {
+			t.Errorf("Restore(%q) = %+v, want owner %q, seq 42 and the request", saved, snap, want)
+		}
+	}
+}
