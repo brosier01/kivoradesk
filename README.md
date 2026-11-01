@@ -59,9 +59,11 @@ Laptop                              Homelab server (Linux, KVM)
   live view.
 - **Privilege separation.** The MCP server runs as `agent`, which owns the
   display and the browser. `shell_run` and `files_*` run as `worker`, which has
-  no access to the display, Chromium DevTools, VNC, the gateway or the control
-  API (local firewall by UID, `doas` limited to the helper). Code the agent
-  runs cannot drive the desktop behind the lock.
+  no access to the display, any service of the VM, including SSH on its own
+  address, or the control API (local firewall by UID, `doas` limited to the
+  helper). Each account only sees its own processes. VNC is reserved to the
+  gateway and DevTools to `agent`. Code the agent runs cannot drive the desktop
+  behind the lock.
 - **Untrusted content.** Page text, file content and command output are wrapped
   as untrusted data. Tools declare MCP annotations (read-only, destructive).
 - **Typing.** `browser_type` inserts any text exactly through CDP.
@@ -192,7 +194,9 @@ Inside the VM:
   process's sandbox refuses the system call that writes this cache, and a new
   profile then crashes the browser.
 - Chromium DevTools (9222), VNC (5900) and the web gateway (6080) listen on
-  localhost only. Over SSH, the `agent` account may only forward to 6080.
+  localhost only. Over SSH, the `agent` account may only forward to 6080. Its
+  authorized keys are in `/etc/ssh/authorized_keys/agent`, on the data disk,
+  and it cannot change them: use `scripts/vm/authorize-key.sh`.
 
 The VM is kept off private networks by a libvirt network filter
 (`host/libvirt/nwfilter-no-lan.xml`), applied on the host so that nothing
