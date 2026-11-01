@@ -155,7 +155,7 @@ for entry in "$AGENT_USER:/home/$AGENT_USER" "$AGENT_USER:$WORKSPACE" "$WORKER_U
 	user=${entry%%:*} dir=${entry#*:}
 	if [ -d "$dir" ] && [ "$(stat -c %u "$dir")" != "$(id -u "$user")" ]; then
 		log "fixing ownership of $dir"
-		chown -R "$user:$user" "$dir"
+		chown -Rh "$user:$user" "$dir"
 	fi
 done
 chmod 0700 "/home/$AGENT_USER" "/home/$WORKER_USER" "$VAULT_DIR"
@@ -182,7 +182,7 @@ chown "$AGENT_USER:$WS_GROUP" "$WORKSPACE"
 chmod 2770 "$WORKSPACE"
 # Default ACLs give the shared group read/write on everything created inside,
 # whatever the creating process's umask.
-setfacl -R -m "g:$WS_GROUP:rwX" -m "d:u::rwX,d:g::rwX,d:g:$WS_GROUP:rwX,d:o::-" "$WORKSPACE"
+setfacl -RP -m "g:$WS_GROUP:rwX" -m "d:u::rwX,d:g::rwX,d:g:$WS_GROUP:rwX,d:o::-" "$WORKSPACE"
 
 log "installing services"
 cp -R rootfs/. /
