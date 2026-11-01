@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/brosier01/kivoradesk/internal/cdp"
+	"github.com/brosier01/kivoradesk/internal/secrets"
 )
 
 // StartupWait is how long a call waits for Chromium to come back after a
@@ -400,10 +401,43 @@ const readPageJS = `(() => {
 // ReadPage returns the active tab's text and numbered interactive elements.
 func (b *Browser) ReadPage(ctx context.Context, maxChars int) (Page, error) {
 	var page Page
-	err := b.withActive(ctx, func(_ *cdp.Conn, p *cdp.Page) error {
+	err := b.withWebPage(ctx, func(p *cdp.Page) error {
 		return p.Eval(ctx, fmt.Sprintf(readPageJS, maxChars), &page)
 	})
 	return page, err
+}
+
+// withWebPage runs fn on the active tab if its content may go back to the
+// model. The browser policies already block local files and browser pages;
+// this holds if they are missing.
+func (b *Browser) withWebPage(ctx context.Context, fn func(*cdp.Page) error) error {
+	return b.withActive(ctx, func(_ *cdp.Conn, p *cdp.Page) error {
+		var href string
+		if err := p.Eval(ctx, "location.href", &href); err != nil {
+			return err
+		}
+		if !isWebPage(href) {
+			return fmt.Errorf("refused: %s is not a web page", href)
+		}
+		return fn(p)
+	})
+}
+
+// isWebPage reports whether rawURL is a page from the web, or empty.
+func isWebPage(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	switch u.Scheme {
+	case "http", "https", "data":
+		return true
+	case "about":
+		return u.Opaque == "blank" || u.Opaque == "srcdoc"
+	case "blob":
+		return strings.HasPrefix(u.Opaque, "http:") || strings.HasPrefix(u.Opaque, "https:")
+	}
+	return false
 }
 
 const elementCenterJS = `(() => {
@@ -499,36 +533,41 @@ func (b *Browser) Type(ctx context.Context, id int, text string, clear, submit b
 const secretTargetJS = `(() => {
   const el = document.querySelector('[data-kivora-id="%d"]');
   if (!el) return {ok: false, why: "element not found; call browser_read_page again"};
-  const fillable = (el.tagName === "INPUT" && !["checkbox", "radio", "submit", "button", "file", "hidden"].includes(el.type)) ||
-    el.tagName === "TEXTAREA";
-  if (!fillable) return {ok: false, why: "element is not a text field"};
+  if (el.tagName !== "INPUT") return {ok: false, why: "element is not an input field"};
   return {ok: true, url: location.href};
 })()`
 
-// secretFillJS checks the origin and fills the field in one script, so that
-// no navigation can happen in between. It uses the native value setter and
-// input events, which frameworks such as React listen to.
-const secretFillJS = `((origin, id, value) => {
-  if (location.origin !== origin) return false;
+// secretFillJS checks the origin and the field and fills it in one script, so
+// that no navigation can happen in between. A password credential only goes
+// into a password field; other fields would let a site display it, for example
+// a search box or a comment form. The mask stays on whatever the site does to
+// the field, such as a button that shows the password. It uses the native
+// value setter and input events, which frameworks such as React listen to.
+const secretFillJS = `((origin, id, kind, value) => {
+  if (location.origin !== origin) return "page";
   const el = document.querySelector('[data-kivora-id="' + id + '"]');
-  if (!el) return false;
+  if (!el || el.tagName !== "INPUT") return "page";
+  const hints = [el.autocomplete, el.name, el.id, el.getAttribute("aria-label"), el.placeholder].join(" ");
+  const allowed = el.type === "password" || (kind === "text" && (el.type === "email" ||
+    (["text", "tel", "number"].includes(el.type) && /user|login|e-?mail|account|identifier|phone|one-time|otp|2fa|mfa|token|code/i.test(hints))));
+  if (!allowed) return "field";
   el.scrollIntoView({block: "center"});
   el.focus();
   el.setAttribute("data-kivora-secret", "");
-  if (el.type !== "password") el.style.webkitTextSecurity = "disc"; // mask on screen too
-  const proto = el.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-  Object.getOwnPropertyDescriptor(proto, "value").set.call(el, value);
+  el.style.setProperty("-webkit-text-security", "disc", "important");
+  Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set.call(el, value);
   el.dispatchEvent(new Event("input", {bubbles: true}));
   el.dispatchEvent(new Event("change", {bubbles: true}));
-  return true;
-})(%s, %d, %s)`
+  return "filled";
+})(%s, %d, %s, %s)`
 
 // FillSecret puts a secret into a field numbered by ReadPage, replacing its
-// content. valueFor receives the page URL and returns the value if the
-// secret may be used there, together with the allowed origin; the fill is
-// refused if the page is no longer on that origin when it happens. The
-// value never comes back from the page: ReadPage hides filled fields.
-func (b *Browser) FillSecret(ctx context.Context, id int, valueFor func(pageURL string) (value, origin string, err error)) (Tab, error) {
+// content. valueFor receives the page URL and returns a grant if the secret
+// may be used there; the fill is refused if the page is no longer on the
+// granted origin when it happens, or if the field does not suit the secret.
+// ReadPage hides filled fields, but the site can still display the value
+// elsewhere after a submit: the MCP server scrubs its results for that.
+func (b *Browser) FillSecret(ctx context.Context, id int, valueFor func(pageURL string) (secrets.Grant, error)) (Tab, error) {
 	err := b.withActive(ctx, func(_ *cdp.Conn, p *cdp.Page) error {
 		var res struct {
 			OK  bool   `json:"ok"`
@@ -541,15 +580,23 @@ func (b *Browser) FillSecret(ctx context.Context, id int, valueFor func(pageURL 
 		if !res.OK {
 			return fmt.Errorf("element %d: %s", id, res.Why)
 		}
-		value, origin, err := valueFor(res.URL)
+		grant, err := valueFor(res.URL)
 		if err != nil {
 			return err
 		}
-		var filled bool
-		if err := p.Eval(ctx, fmt.Sprintf(secretFillJS, jsString(origin), id, jsString(value)), &filled); err != nil {
+		var status string
+		script := fmt.Sprintf(secretFillJS, jsString(grant.Origin), id, jsString(grant.Field), jsString(grant.Value))
+		if err := p.Eval(ctx, script, &status); err != nil {
 			return errors.New("could not fill the field") // never echo the script: it holds the value
 		}
-		if !filled {
+		switch status {
+		case "filled":
+		case "field":
+			if grant.Field == secrets.FieldPassword {
+				return fmt.Errorf("element %d is not a password field, the only kind this credential may go into", id)
+			}
+			return fmt.Errorf("element %d is not a password, login, email or one-time code field", id)
+		default:
 			return errors.New("the page changed before the field could be filled; read it again")
 		}
 		time.Sleep(200 * time.Millisecond) // let the masked field paint before a screenshot
@@ -568,7 +615,7 @@ func (b *Browser) WaitForText(ctx context.Context, text string, timeout time.Dur
 	js := fmt.Sprintf(`document.body ? document.body.innerText.includes(%s) : false`, jsString(text))
 	for {
 		var found bool
-		err := b.withActive(ctx, func(_ *cdp.Conn, p *cdp.Page) error { return p.Eval(ctx, js, &found) })
+		err := b.withWebPage(ctx, func(p *cdp.Page) error { return p.Eval(ctx, js, &found) })
 		if err == nil && found {
 			return nil
 		}
@@ -583,7 +630,7 @@ func (b *Browser) WaitForText(ctx context.Context, text string, timeout time.Dur
 // PDF prints the active tab to PDF.
 func (b *Browser) PDF(ctx context.Context) ([]byte, Tab, error) {
 	var data []byte
-	err := b.withActive(ctx, func(_ *cdp.Conn, p *cdp.Page) error {
+	err := b.withWebPage(ctx, func(p *cdp.Page) error {
 		var res struct {
 			Data string `json:"data"`
 		}

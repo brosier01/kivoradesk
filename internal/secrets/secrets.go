@@ -2,9 +2,10 @@
 // without ever reading them.
 //
 // Each secret is bound to the origins (scheme, host and port) where it may
-// be filled. The store is a JSON file readable only by the desktop account;
-// the human manages it from the server, and the agent only sees names and
-// origins.
+// be filled, and to the kind of field it may go into. The store is a JSON file
+// readable only by the vault account (cmd/kivora-vault), not by the desktop
+// account, whose browser the agent drives. The human manages it from the
+// server; the agent only sees names, origins and field kinds.
 package secrets
 
 import (
@@ -20,16 +21,41 @@ import (
 	"strings"
 )
 
+// Field kinds say which inputs may receive a secret.
+const (
+	// FieldPassword is for password inputs only, which browsers neither echo
+	// nor let anyone copy. It is the default.
+	FieldPassword = "password"
+	// FieldText also allows inputs declared as a login name, an email address
+	// or a one-time code. Sites may display what these contain.
+	FieldText = "text"
+)
+
 // Secret is one stored credential.
 type Secret struct {
 	Origins []string `json:"origins"`
 	Value   string   `json:"value"`
+	Field   string   `json:"field,omitempty"` // empty means FieldPassword
 }
 
 // Info is what the agent may know about a secret.
 type Info struct {
 	Name    string   `json:"name"`
 	Origins []string `json:"origins"`
+	Field   string   `json:"field"`
+}
+
+// Request asks for the value of a secret on behalf of a page.
+type Request struct {
+	Name string `json:"name"`
+	URL  string `json:"url"`
+}
+
+// Grant is a value handed out for one fill.
+type Grant struct {
+	Value  string `json:"value"`
+	Origin string `json:"origin"`
+	Field  string `json:"field"`
 }
 
 // Store is a secrets file.
@@ -108,10 +134,23 @@ func (s *Store) save(m map[string]Secret) error {
 	return os.Rename(tmp.Name(), s.Path)
 }
 
-// Set creates or replaces a secret.
-func (s *Store) Set(name string, origins []string, value string) error {
+func (sec Secret) field() string {
+	if sec.Field == "" {
+		return FieldPassword
+	}
+	return sec.Field
+}
+
+// Set creates or replaces a secret. An empty field means FieldPassword.
+func (s *Store) Set(name, field string, origins []string, value string) error {
 	if !validName.MatchString(name) {
 		return fmt.Errorf("invalid name %q (letters, digits, . _ -; up to 64 characters)", name)
+	}
+	if field == "" {
+		field = FieldPassword
+	}
+	if field != FieldPassword && field != FieldText {
+		return fmt.Errorf("invalid field kind %q (want %s or %s)", field, FieldPassword, FieldText)
 	}
 	if value == "" {
 		return errors.New("empty value")
@@ -133,7 +172,7 @@ func (s *Store) Set(name string, origins []string, value string) error {
 	if err != nil {
 		return err
 	}
-	m[name] = Secret{Origins: norm, Value: value}
+	m[name] = Secret{Origins: norm, Value: value, Field: field}
 	return s.save(m)
 }
 
@@ -150,7 +189,8 @@ func (s *Store) Delete(name string) error {
 	return s.save(m)
 }
 
-// List returns names and origins, sorted by name. Values are not included.
+// List returns names, origins and field kinds, sorted by name. Values are not
+// included.
 func (s *Store) List() ([]Info, error) {
 	m, err := s.load()
 	if err != nil {
@@ -158,27 +198,26 @@ func (s *Store) List() ([]Info, error) {
 	}
 	infos := []Info{}
 	for name, sec := range m {
-		infos = append(infos, Info{Name: name, Origins: sec.Origins})
+		infos = append(infos, Info{Name: name, Origins: sec.Origins, Field: sec.field()})
 	}
 	sort.Slice(infos, func(i, j int) bool { return infos[i].Name < infos[j].Name })
 	return infos, nil
 }
 
-// ValueFor returns the value of a secret and the matching origin if pageURL
-// is on one of the secret's origins.
-func (s *Store) ValueFor(name, pageURL string) (value, origin string, err error) {
+// ValueFor returns a grant for a secret if pageURL is on one of its origins.
+func (s *Store) ValueFor(name, pageURL string) (Grant, error) {
 	m, err := s.load()
 	if err != nil {
-		return "", "", err
+		return Grant{}, err
 	}
 	sec, ok := m[name]
 	if !ok {
-		return "", "", fmt.Errorf("no secret named %q; ask the human to add it", name)
+		return Grant{}, fmt.Errorf("no secret named %q; ask the human to add it", name)
 	}
-	origin, err = NormalizeOrigin(pageURL)
+	origin, err := NormalizeOrigin(pageURL)
 	if err != nil || !slices.Contains(sec.Origins, origin) {
-		return "", "", fmt.Errorf("secret %q may only be used on %s, not on this page (%s)",
+		return Grant{}, fmt.Errorf("secret %q may only be used on %s, not on this page (%s)",
 			name, strings.Join(sec.Origins, ", "), pageURL)
 	}
-	return sec.Value, origin, nil
+	return Grant{Value: sec.Value, Origin: origin, Field: sec.field()}, nil
 }
