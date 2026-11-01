@@ -8,9 +8,10 @@ KivoraDesk runs an Alpine Linux VM on your own server (QEMU/KVM + libvirt).
 Claude Code stays on your laptop and drives the VM through an MCP server reached
 over SSH. You can watch the desktop live and take over at any time.
 
-> **Status:** early development. Phases 0 to 2 are done: Claude Code on a
+> **Status:** early development. Phases 0 to 3 are done: Claude Code on a
 > laptop drives the VM through the MCP server (web research, forms, PDFs,
-> shell, files) while the human watches and can take over.
+> shell, files, credentials) while the human watches and can take over, with
+> backups, recovery and a 30-scenario reliability suite at 100 %.
 
 ## How it works
 
@@ -43,6 +44,7 @@ Laptop                              Homelab server (Linux, KVM)
 | Browser (CDP, visible tab) | `browser_navigate`, `browser_read_page`, `browser_click`, `browser_type`, `browser_wait_for`, `browser_back`, `browser_forward`, `browser_reload`, `browser_tabs`, `browser_new_tab`, `browser_switch_tab`, `browser_close_tab`, `browser_save_pdf`, `browser_download` |
 | Shell | `shell_run` |
 | Files (`/workspace`) | `files_list`, `files_read`, `files_write`, `files_delete` |
+| Credentials | `secrets_list`, `secrets_fill` |
 | Human | `human_request_takeover`, `human_wait_for_control` |
 
 - **Input lock.** Acting tools run only while the agent owns the desktop, one
@@ -61,7 +63,17 @@ Laptop                              Homelab server (Linux, KVM)
   `computer_type` types ASCII with the keyboard and pastes other characters
   through the clipboard, checking control between chunks.
 - **Audit.** Every call is logged as a JSON line with a trace ID in
-  `/home/agent/.local/state/kivora/audit.log`.
+  `/home/agent/.local/state/kivora/audit/audit-YYYY-MM-DD.jsonl`, kept 90 days.
+  Passwords, tokens and keys are masked in the logged arguments.
+- **Timeouts and recovery.** Every call has a maximum duration. After a
+  Chromium crash, browser tools wait for the service to restart it; without
+  Internet they fail at once with the browser's network error.
+- **Credentials.** The human stores credentials with `scripts/vm/secret.sh`,
+  each bound to the sites where it may be used. The agent sees names and sites
+  only; `secrets_fill` checks the page origin and fills the field in one step,
+  and masks it on screen. Password fields and filled fields are never returned
+  by `browser_read_page`. Once logged in, the agent can still read what the
+  site itself displays.
 - **Files to the laptop.** Copy them with `scp kivoradesk:/workspace/<path> .`
 
 ## Use with Claude Code
@@ -102,7 +114,7 @@ Resources: about 313 MiB RAM used at idle, 490 MiB with three real sites open,
 | 0 | Feasibility: KVM, Alpine, Chromium, CDP, native input | Done |
 | 1 | Live view from the laptop, human takeover, SSH access path, data disk, network isolation | Done |
 | 2 | MCP server: `computer`, `browser`, `shell`, `files`, `human`; agent/human lock; worker account | Done |
-| 3 | Robustness: update/recover/reset, encrypted backups, audit retention, secrets, mobile view | Next |
+| 3 | Robustness: fault recovery, timeouts, diagnostics, update/recover/reset, encrypted backups, audit retention, credentials, mobile view, network allowlist, scenario suite | Done |
 | 4 | Optimisation and published benchmarks | Planned |
 | 5 | Installation guide and first release | Planned |
 
@@ -111,6 +123,7 @@ Resources: about 313 MiB RAM used at idle, 490 MiB with three real sites open,
 ```text
 cmd/kivora-mcp/     MCP server (and the worker helper it runs as worker)
 cmd/kivora-probe/   input accuracy probe, runs inside the VM
+cmd/kivora-scenarios/ workflow reliability suite over MCP
 cmd/kivora-web/     web gateway: live view, takeover, input control state
 internal/browser/   structured browser tools over CDP
 internal/control/   input owner state (agent, paused, human) and agent API
@@ -138,6 +151,8 @@ scripts/vm/ssh.sh                       # open a shell as the admin user
 scripts/vm/destroy.sh --yes --keep-data # rebuild the system, keep /home/agent and /workspace
 scripts/vm/destroy.sh --yes             # delete the VM and all its data
 scripts/vm/check-isolation.sh           # VM reaches the Internet, not private networks
+scripts/vm/doctor.sh                    # diagnose the VM, its services and the MCP server
+scripts/vm/allow.sh add 192.168.1.20:8080 staging   # let the VM reach one private service
 ```
 
 Settings (VM name, sizes, fixed IP, Alpine release, libvirt pool) can be
@@ -163,10 +178,45 @@ inside the VM can lift it. New connections to 10.0.0.0/8, 172.16.0.0/12,
 192.168.0.0/16, 169.254.0.0/16 and 100.64.0.0/10 are dropped, except DNS and
 DHCP on the libvirt gateway; the host can still open SSH sessions to the VM.
 `check-isolation.sh` verifies this against the host's own addresses and the
-LAN router.
+LAN router. `allow.sh add|remove|list` manages exceptions (an address,
+optionally a CIDR and a TCP port), kept in `~/.local/share/kivoradesk/allowlist`
+on the host and applied to the running VM at once.
 
 Use `virsh shutdown --mode agent kivoradesk` for a clean shutdown: the Alpine
 virt image has no ACPI power button.
+
+## Maintenance
+
+All scripts run on the server and keep the data disk (`/home/agent`,
+`/workspace`: files, browser profile, logins) unless stated otherwise.
+
+```sh
+scripts/vm/backup.sh                          # encrypted backup of the data disk
+scripts/vm/backup.sh --install-cron "0 3 * * *"   # daily at 3:00 (crontab)
+scripts/vm/restore.sh --list                  # backups, most recent first
+scripts/vm/restore.sh --yes [FILE]            # reset the data (backs up the current data first)
+scripts/vm/update.sh [--reboot]               # backup, Alpine upgrade, redeploy, diagnostics
+scripts/vm/recover.sh --yes                   # rebuild a broken system around the data
+```
+
+Backups are point-in-time copies taken while the VM runs: libvirt starts the
+copy with the guest filesystem frozen for a moment, then copies in the
+background. They are encrypted with GPG (AES-256) using the passphrase in
+`~/.local/share/kivoradesk/backup.passphrase` and stored in
+`~/.local/share/kivoradesk/backups` (`KIVORA_BACKUP_DIR`), seven kept
+(`KIVORA_BACKUP_KEEP`). **Keep a copy of the passphrase file elsewhere**:
+without it, backups cannot be restored.
+
+## Credentials
+
+```sh
+scripts/vm/secret.sh set github-password https://github.com   # prompts for the value
+scripts/vm/secret.sh list                                     # names and sites
+scripts/vm/secret.sh delete github-password
+```
+
+Values are stored in the VM, readable only by the desktop account, and
+included in the encrypted backups of the data disk.
 
 ## Live view from the laptop
 
@@ -194,6 +244,34 @@ open "http://localhost:6080/?token=…"   # the URL from web-url.sh, once
 The token is stored in a strict same-site cookie. The gateway also rejects
 non-loopback `Host` headers and cross-origin control requests.
 
+## Scenario suite
+
+`kivora-scenarios` measures how reliably complete workflows run (PRD target:
+at least 90 % over 30 scenarios). It drives the real MCP server over SSH with
+scripted tool sequences, so it measures the computer, not a model's
+reasoning:
+
+| Area | Scenarios |
+|---|---|
+| Web | search, read a long page and a truncated one, follow links, back/forward/reload, tabs, slow page, redirects, navigate with the keyboard |
+| Forms and typing | fill and submit a form, Unicode through CDP and through the keyboard, site search box |
+| Files from the web | PDF, binary download, download with the browser's cookies, download then process in the shell |
+| Desktop | screenshot and scroll, windows and focus |
+| Shell and files | pipeline, files round trip, timeout, worker isolation |
+| Human control | input lock, takeover request |
+| Persistence and faults | login kept across a browser restart, credentials, Chromium crash, Internet loss |
+
+```sh
+go build -o bin/kivora-scenarios ./cmd/kivora-scenarios
+bin/kivora-scenarios -mcp "ssh -i $KEY -T agent@192.168.122.50 /usr/local/bin/kivora-mcp" \
+  -token "$(scripts/vm/ssh.sh 'doas cat /var/lib/kivora-web/token')" \
+  -scripts "$PWD/scripts/vm" -runs 10
+```
+
+Result on 2026-11-01 (Alpine 3.24, Chromium 155, 2 vCPU, 4 GiB): **300/300
+runs passed (100 %)**, 10 runs per scenario. Without Internet, navigation
+fails with an explicit error, at once or after its 45-second timeout.
+
 ## Tests
 
 Unit tests run anywhere: `go test ./...`.
@@ -214,6 +292,10 @@ go test -tags integration -p 1 ./cmd/...   # one at a time: they share the VM
 The MCP tests drive the real server over SSH: browsing, forms, accented
 typing, PDF and download, shell and files, the input lock and the takeover
 request. `KIVORA_TYPE_RUNS=100` sets the number of accented typing runs.
+`KIVORA_HOST_SCRIPTS=1` adds the tests that use the server's admin scripts:
+fault injection (Chromium is killed, the VM loses its Internet route, and the
+tools must recover or fail explicitly) and a credential that must never
+reach the model.
 
 ### Input accuracy probe
 

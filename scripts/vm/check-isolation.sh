@@ -2,7 +2,8 @@
 # Check that the VM reaches the Internet but none of the private services the
 # host can reach: the host itself, the LAN router and anything on the host's
 # other networks. Each private target is first checked from the host, so a
-# target that is down does not count as blocked.
+# target that is down does not count as blocked. Targets in the allowlist
+# (scripts/vm/allow.sh) are reported, not checked.
 set -euo pipefail
 source "$(dirname "$0")/common.sh"
 
@@ -21,7 +22,9 @@ router=$(ip -4 route show default | awk '{print $3; exit}')
 failed=0
 for target in "${targets[@]}"; do
 	host=${target%:*} port=${target#*:}
-	if ! reachable_from_host "$host" "$port"; then
+	if [[ -f $KIVORA_ALLOWLIST ]] && grep -qE "^($host|$host:$port)( |$)" "$KIVORA_ALLOWLIST"; then
+		printf '%-8s %s (in the allowlist)\n' allowed "$target"
+	elif ! reachable_from_host "$host" "$port"; then
 		printf '%-8s %s (not reachable from the host either)\n' skip "$target"
 	elif reachable_from_vm "$host" "$port"; then
 		printf '%-8s %s reachable from the VM\n' FAIL "$target"

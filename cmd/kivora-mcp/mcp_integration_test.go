@@ -236,3 +236,7 @@ func TestMCPTypingReliability(t *testing.T) {
 		t.Fail()
 	}
 }
+
+func callParams(name string, args map[string]any) *mcp.CallToolParams {
+	return &mcp.CallToolParams{Name: name, Arguments: args}
+}

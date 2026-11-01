@@ -30,6 +30,7 @@ func (s *server) register(srv *mcp.Server) {
 	s.registerComputer(srv)
 	s.registerBrowser(srv)
 	s.registerShellAndFiles(srv)
+	s.registerSecrets(srv)
 	s.registerHuman(srv)
 }
 
@@ -53,7 +54,12 @@ func (s *server) registerComputer(srv *mcp.Server) {
 			}
 			var st syscall.Statfs_t
 			if syscall.Statfs("/workspace", &st) == nil {
-				state["workspace_free_bytes"] = st.Bavail * uint64(st.Bsize)
+				free, total := st.Bavail*uint64(st.Bsize), st.Blocks*uint64(st.Bsize)
+				state["workspace_free_bytes"] = free
+				if free < 1<<30 || free*10 < total {
+					state["workspace_warning"] = "Low disk space in /workspace. Tell the human once, listing the largest items " +
+						"(shell_run: du -sh /workspace/* | sort -h | tail), and delete nothing without their confirmation."
+				}
 			}
 			return jsonText(state), nil
 		})
@@ -340,7 +346,7 @@ func (s *server) registerBrowser(srv *mcp.Server) {
 		Submit  bool   `json:"submit,omitempty" jsonschema:"press Enter afterwards, e.g. to run a search"`
 	}
 	add(srv, s, act, &mcp.Tool{Name: "browser_type",
-		Description: "Type text into a field of the visible page. Never use it for passwords or payment details: ask the human with human_request_takeover."},
+		Description: "Type text into a field of the visible page. Never use it for passwords or payment details: use secrets_fill, or ask the human with human_request_takeover."},
 		func(ctx context.Context, in btypeIn) ([]mcp.Content, error) {
 			tab, err := s.br.Type(ctx, in.Element, in.Text, in.Clear, in.Submit)
 			if err != nil {
@@ -482,6 +488,37 @@ func (s *server) registerShellAndFiles(srv *mcp.Server) {
 				return nil, err
 			}
 			return text("Deleted %s.", in.Path), nil
+		})
+}
+
+func (s *server) registerSecrets(srv *mcp.Server) {
+	add(srv, s, observe, &mcp.Tool{Name: "secrets_list",
+		Description: "List the credentials the human stored (names and the sites where each may be used). Values are never shown."},
+		func(ctx context.Context, _ none) ([]mcp.Content, error) {
+			infos, err := s.vault.List()
+			if err != nil {
+				return nil, err
+			}
+			if len(infos) == 0 {
+				return text("No credentials stored. Ask the human to add one, or use human_request_takeover."), nil
+			}
+			return jsonText(infos), nil
+		})
+
+	type fillIn struct {
+		Name    string `json:"name" jsonschema:"credential name from secrets_list"`
+		Element int    `json:"element" jsonschema:"text or password field number from browser_read_page"`
+	}
+	add(srv, s, act, &mcp.Tool{Name: "secrets_fill",
+		Description: "Fill a stored credential into a field of the visible page without revealing it. Refused unless the page is on one of the credential's sites. Submit the form yourself afterwards."},
+		func(ctx context.Context, in fillIn) ([]mcp.Content, error) {
+			tab, err := s.br.FillSecret(ctx, in.Element, func(pageURL string) (string, string, error) {
+				return s.vault.ValueFor(in.Name, pageURL)
+			})
+			if err != nil {
+				return nil, err
+			}
+			return text("Filled %s into element %d. %s", in.Name, in.Element, tabText(tab)), nil
 		})
 }
 

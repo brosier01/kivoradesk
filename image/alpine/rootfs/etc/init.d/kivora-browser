@@ -24,10 +24,19 @@ command_user="$KIVORA_USER:$KIVORA_USER"
 directory="/home/$KIVORA_USER"
 supervise_daemon_args="--env DISPLAY=$KIVORA_DISPLAY --env HOME=/home/$KIVORA_USER"
 respawn_delay=3
+# Never give up on the browser: the agent cannot work without it, and a
+# restart every few seconds costs little even in a crash loop.
+respawn_max=0
 
 depend() {
 	need kivora-display dbus
 	after kivora-wm
+}
+
+stop_pre() {
+	# Chromium writes cookies to disk in batches: close it normally so that
+	# the latest logins survive a restart, an update or a VM shutdown.
+	/usr/local/bin/kivora-mcp browser-close -cdp "http://127.0.0.1:$KIVORA_CDP_PORT" || true
 }
 
 start_pre() {

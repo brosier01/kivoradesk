@@ -12,6 +12,9 @@ command_args="-listen 127.0.0.1:$KIVORA_WEB_PORT -vnc 127.0.0.1:$KIVORA_VNC_PORT
 # desktop account, not the worker) can read or request control.
 command_user="kivora-web:kivora-ctl"
 respawn_delay=2
+# Restart after crashes, giving up only on a crash loop (5 within a minute).
+respawn_max=5
+respawn_period=60
 output_log=/var/log/kivora-web.log
 error_log=/var/log/kivora-web.log
 

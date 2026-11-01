@@ -1,17 +1,21 @@
 package desktop
 
 import (
+	"context"
 	"reflect"
 	"testing"
+	"time"
 )
 
 func TestSplitText(t *testing.T) {
-	got := SplitText("abcdef é€ ok\n", 4)
+	got := SplitText("abcdef é€ ok\nab\tcdefgh\n\n", 4)
 	want := []Segment{
 		{"abcd", true},
-		{"ef ", true},
-		{"é€", false},
-		{" ok\n", true},
+		{"ef é", false},
+		{"€ ok", false},
+		{"\nab\t", true},
+		{"cdef", true},
+		{"gh\n\n", true},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("SplitText = %+v, want %+v", got, want)
@@ -32,5 +36,25 @@ func TestCheckPoint(t *testing.T) {
 		if err := d.CheckPoint(p[0], p[1]); err == nil {
 			t.Errorf("CheckPoint%v accepted a point off screen", p)
 		}
+	}
+}
+
+func TestRequestLogCountsServedRequests(t *testing.T) {
+	l := newRequestLog()
+	ctx := context.Background()
+	l.Write([]byte("Using UTF8_STRING.\nWaiting for selection requests, Control-C to quit\n"))
+	l.Write([]byte("  Waiting for selection request number 1\n  Waiting for sel"))
+	if n := l.served(); n != 0 {
+		t.Fatalf("served = %d before any answer, want 0", n)
+	}
+	if l.waitAbove(ctx, 0, 20*time.Millisecond) {
+		t.Fatal("waitAbove returned true with no request served")
+	}
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		l.Write([]byte("ection request number 2\n"))
+	}()
+	if !l.waitAbove(ctx, 0, time.Second) || l.served() != 1 {
+		t.Fatalf("served = %d after one answer split across writes, want 1", l.served())
 	}
 }
