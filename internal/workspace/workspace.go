@@ -6,7 +6,8 @@
 // account is about to write and redirect the write into the desktop
 // account's private files. Every path is therefore resolved with openat2,
 // refusing symlinks and anything outside the workspace, and existing files
-// are never overwritten.
+// are never overwritten. The directory stays open while a file is written, so
+// that cleaning up after an error cannot follow what the worker put in its place.
 package workspace
 
 import (
@@ -49,12 +50,18 @@ func Create(root, dir, name string, r io.Reader, limit int64) (string, error) {
 	}
 	defer unix.Close(rootFD)
 
-	how := &unix.OpenHow{Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS}
+	const resolve = unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS
+	dirFD := rootFD
 	if dir != "" {
 		dir = SanitizeName(dir)
 		if err := unix.Mkdirat(rootFD, dir, 0o770); err != nil && !errors.Is(err, unix.EEXIST) {
 			return "", fmt.Errorf("create %s: %w", dir, err)
 		}
+		dirFD, err = unix.Openat2(rootFD, dir, &unix.OpenHow{Flags: unix.O_PATH | unix.O_DIRECTORY | unix.O_CLOEXEC, Resolve: resolve})
+		if err != nil {
+			return "", fmt.Errorf("open %s: %w", dir, err)
+		}
+		defer unix.Close(dirFD)
 	}
 
 	name = SanitizeName(name)
@@ -66,9 +73,9 @@ func Create(root, dir, name string, r io.Reader, limit int64) (string, error) {
 			candidate = fmt.Sprintf("%s (%d)%s", stem, i, ext)
 		}
 		rel := path.Join(dir, candidate)
-		how.Flags = unix.O_WRONLY | unix.O_CREAT | unix.O_EXCL | unix.O_CLOEXEC
-		how.Mode = 0o660
-		fd, err := unix.Openat2(rootFD, rel, how)
+		fd, err := unix.Openat2(dirFD, candidate, &unix.OpenHow{
+			Flags: unix.O_WRONLY | unix.O_CREAT | unix.O_EXCL | unix.O_CLOEXEC, Mode: 0o660, Resolve: resolve,
+		})
 		if errors.Is(err, unix.EEXIST) {
 			continue
 		}
@@ -84,7 +91,7 @@ func Create(root, dir, name string, r io.Reader, limit int64) (string, error) {
 			err = fmt.Errorf("file larger than %d bytes", limit)
 		}
 		if err != nil {
-			unix.Unlinkat(rootFD, rel, 0)
+			unix.Unlinkat(dirFD, candidate, 0)
 			return "", err
 		}
 		return rel, nil

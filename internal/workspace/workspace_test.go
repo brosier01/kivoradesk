@@ -1,6 +1,7 @@
 package workspace
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -68,5 +69,32 @@ func TestCreateEnforcesLimit(t *testing.T) {
 	}
 	if entries, _ := os.ReadDir(root); len(entries) != 0 {
 		t.Fatalf("partial file left behind: %v", entries)
+	}
+}
+
+// swapDir replaces the directory with a link when the file is being written,
+// as the worker could, and then fails like a lost connection.
+type swapDir struct{ dir, target string }
+
+func (s swapDir) Read([]byte) (int, error) {
+	os.Rename(s.dir, s.dir+".old")
+	os.Symlink(s.target, s.dir)
+	return 0, errors.New("connection lost")
+}
+
+func TestCleanupDoesNotFollowASwappedDirectory(t *testing.T) {
+	root, outside := t.TempDir(), t.TempDir()
+	victim := filepath.Join(outside, "x.txt")
+	os.WriteFile(victim, []byte("safe"), 0o600)
+	dir := filepath.Join(root, "downloads")
+
+	if _, err := Create(root, "downloads", "x.txt", swapDir{dir, outside}, 10); err == nil {
+		t.Fatal("Create succeeded on a failing reader")
+	}
+	if b, err := os.ReadFile(victim); err != nil || string(b) != "safe" {
+		t.Fatalf("file outside the workspace changed: %q, %v", b, err)
+	}
+	if _, err := os.Stat(dir + ".old/x.txt"); err == nil {
+		t.Fatal("partial file left behind")
 	}
 }
