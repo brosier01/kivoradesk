@@ -101,7 +101,9 @@ func main() {
 	f.sites = strings.Split(*sites, ",")
 	if f.mcpCmd == "" {
 		key := os.ExpandEnv("$HOME/.local/share/kivoradesk/ssh/id_ed25519")
-		f.mcpCmd = "ssh -i " + key + " -o BatchMode=yes -T agent@192.168.122.50 /usr/local/bin/kivora-mcp"
+		// Like scripts/vm: the VM gets new host keys when it is rebuilt.
+		f.mcpCmd = "ssh -i " + key + " -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null" +
+			" -o LogLevel=ERROR -T agent@192.168.122.50 /usr/local/bin/kivora-mcp"
 	}
 
 	r := &report{Label: *label, Date: time.Now().UTC().Format(time.RFC3339), Sites: f.sites, settings: f}
