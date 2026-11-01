@@ -56,6 +56,9 @@ apk add -q \
 	bash curl libgcc libstdc++ ripgrep xclip \
 	e2fsprogs acl nftables qemu-guest-agent
 
+# Boot without waiting at the boot menu.
+[ -f /boot/limine/limine.conf ] && sed -i 's/^timeout: .*/timeout: 1/' /boot/limine/limine.conf
+
 # The Alpine virt image exposes no ACPI power button, so libvirt shuts the
 # VM down and freezes filesystems for snapshots through the guest agent.
 rc-update add qemu-guest-agent default >/dev/null
