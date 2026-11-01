@@ -10,6 +10,7 @@ import (
 
 	"github.com/brosier01/kivoradesk/internal/control"
 	"github.com/brosier01/kivoradesk/internal/desktop"
+	"github.com/brosier01/kivoradesk/internal/secrets"
 	"github.com/brosier01/kivoradesk/internal/workspace"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -493,9 +494,9 @@ func (s *server) registerShellAndFiles(srv *mcp.Server) {
 
 func (s *server) registerSecrets(srv *mcp.Server) {
 	add(srv, s, observe, &mcp.Tool{Name: "secrets_list",
-		Description: "List the credentials the human stored (names and the sites where each may be used). Values are never shown."},
+		Description: "List the credentials the human stored (names, the sites where each may be used and the kind of field it goes into). Values are never shown."},
 		func(ctx context.Context, _ none) ([]mcp.Content, error) {
-			infos, err := s.vault.List()
+			infos, err := s.vault.List(ctx)
 			if err != nil {
 				return nil, err
 			}
@@ -510,10 +511,10 @@ func (s *server) registerSecrets(srv *mcp.Server) {
 		Element int    `json:"element" jsonschema:"text or password field number from browser_read_page"`
 	}
 	add(srv, s, act, &mcp.Tool{Name: "secrets_fill",
-		Description: "Fill a stored credential into a field of the visible page without revealing it. Refused unless the page is on one of the credential's sites. Submit the form yourself afterwards."},
+		Description: "Fill a stored credential into a field of the visible page without revealing it. Refused unless the page is on one of the credential's sites and the field suits the credential: password fields for \"password\" credentials, also login, email and one-time code fields for \"text\" ones. Submit the form yourself afterwards."},
 		func(ctx context.Context, in fillIn) ([]mcp.Content, error) {
-			tab, err := s.br.FillSecret(ctx, in.Element, func(pageURL string) (string, string, error) {
-				return s.vault.ValueFor(in.Name, pageURL)
+			tab, err := s.br.FillSecret(ctx, in.Element, func(pageURL string) (secrets.Grant, error) {
+				return s.vault.ValueFor(ctx, in.Name, pageURL)
 			})
 			if err != nil {
 				return nil, err

@@ -24,7 +24,7 @@ type server struct {
 	desk  *desktop.Desktop
 	br    *browser.Browser
 	work  *worker.Runner
-	vault *secrets.Store
+	vault *secrets.Client
 	audit *auditLog
 
 	mu sync.Mutex // one acting tool at a time

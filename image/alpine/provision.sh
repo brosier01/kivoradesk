@@ -16,6 +16,11 @@ WORKER_UID=${WORKER_UID:-1101}
 WS_GROUP=kivora-ws WS_GID=1200
 CTL_GROUP=kivora-ctl CTL_GID=1201
 WEB_USER=${WEB_USER:-kivora-web}
+# The vault account alone reads the credentials, out of reach of the browser,
+# which runs as the agent. They stay on the data disk.
+VAULT_USER=${VAULT_USER:-kivora-vault}
+VAULT_UID=${VAULT_UID:-1102}
+VAULT_DIR=/var/lib/kivora-vault
 WORKSPACE=${WORKSPACE:-/workspace}
 DATA_DIR=/data
 DATA_SERIAL=kivora-data
@@ -118,6 +123,12 @@ if ! id "$WEB_USER" >/dev/null 2>&1; then
 fi
 install -d -m 700 -o "$WEB_USER" "/var/lib/$WEB_USER"
 
+if ! id "$VAULT_USER" >/dev/null 2>&1; then
+	log "creating unprivileged user $VAULT_USER"
+	adduser -D -H -u "$VAULT_UID" -h "$VAULT_DIR" -s /sbin/nologin -g "KivoraDesk credentials" "$VAULT_USER"
+fi
+mkdir -p "$VAULT_DIR"
+
 disk=$(data_disk)
 if [ -n "$disk" ]; then
 	log "setting up data disk $disk"
@@ -134,19 +145,36 @@ if [ -n "$disk" ]; then
 	bind_to_data "/home/$AGENT_USER"
 	bind_to_data "/home/$WORKER_USER"
 	bind_to_data "$WORKSPACE"
+	bind_to_data "$VAULT_DIR"
 else
 	log "no data disk (serial $DATA_SERIAL): keeping data on the system disk"
 fi
 
 # A data disk from an older VM may carry other UIDs.
-for entry in "$AGENT_USER:/home/$AGENT_USER" "$AGENT_USER:$WORKSPACE" "$WORKER_USER:/home/$WORKER_USER"; do
+for entry in "$AGENT_USER:/home/$AGENT_USER" "$AGENT_USER:$WORKSPACE" "$WORKER_USER:/home/$WORKER_USER" "$VAULT_USER:$VAULT_DIR"; do
 	user=${entry%%:*} dir=${entry#*:}
 	if [ -d "$dir" ] && [ "$(stat -c %u "$dir")" != "$(id -u "$user")" ]; then
 		log "fixing ownership of $dir"
 		chown -R "$user:$user" "$dir"
 	fi
 done
-chmod 0700 "/home/$AGENT_USER" "/home/$WORKER_USER"
+chmod 0700 "/home/$AGENT_USER" "/home/$WORKER_USER" "$VAULT_DIR"
+
+# Credentials used to live in the agent's home, where the browser could read
+# them. Each step runs as the account concerned: root must not follow a link
+# planted in that home.
+old_vault=/home/$AGENT_USER/.local/state/kivora/secrets.json
+if [ -e "$old_vault" ] || [ -L "$old_vault" ]; then
+	log "moving the credentials to the $VAULT_USER account"
+	creds=$(su -s /bin/sh "$AGENT_USER" -c "cat '$old_vault'" 2>/dev/null) || creds=
+	if [ -e "$VAULT_DIR/secrets.json" ]; then
+		log "warning: the vault already holds credentials: deleting $old_vault without merging it"
+	elif [ -n "$creds" ]; then
+		printf '%s' "$creds" | su -s /bin/sh "$VAULT_USER" -c "umask 077; cat >'$VAULT_DIR/secrets.json'"
+	fi
+	unset creds
+	su -s /bin/sh "$AGENT_USER" -c "rm -f '$old_vault'"
+fi
 
 log "preparing $WORKSPACE"
 mkdir -p "$WORKSPACE"

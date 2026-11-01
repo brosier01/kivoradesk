@@ -430,7 +430,8 @@ var scenarios = []scenario{
 	{name: "worker_isolation", run: func(r *runner) error {
 		out, err := r.call("shell_run", map[string]any{"command": "id -un; cat /home/agent/.Xauthority >/dev/null 2>&1 && echo LEAK-X; " +
 			"wget -q -T 3 -O- http://127.0.0.1:9222/json/version >/dev/null 2>&1 && echo LEAK-CDP; " +
-			"wget -q -T 3 -O- http://192.168.1.1/ >/dev/null 2>&1 && echo LEAK-LAN; echo done"})
+			"wget -q -T 3 -O- http://192.168.1.1/ >/dev/null 2>&1 && echo LEAK-LAN; " +
+			"cat /var/lib/kivora-vault/secrets.json >/dev/null 2>&1 && echo LEAK-VAULT; echo done"})
 		if err != nil {
 			return err
 		}
@@ -517,8 +518,8 @@ var scenarios = []scenario{
 		return contains(page, v)
 	}},
 	{name: "secret_fill", host: true, run: func(r *runner) error {
-		value := "Sc-" + unique()
-		if _, err := r.script(value, "secret.sh", "set", "scenario-secret", "https://httpbin.org"); err != nil {
+		value := "sc-" + unique() + "@example.com"
+		if _, err := r.script(value, "secret.sh", "set", "--field", "text", "scenario-secret", "https://httpbin.org"); err != nil {
 			return err
 		}
 		defer r.script("", "secret.sh", "delete", "scenario-secret")
@@ -529,7 +530,7 @@ var scenarios = []scenario{
 		if err != nil {
 			return err
 		}
-		id, err := element(page, `"custtel"`)
+		id, err := element(page, `"custemail"`)
 		if err != nil {
 			return err
 		}

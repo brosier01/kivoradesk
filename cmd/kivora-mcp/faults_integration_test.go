@@ -100,11 +100,12 @@ func firstLine(s string) string {
 
 // TestSecretNeverReachesTheModel stores a random credential bound to
 // httpbin.org and checks that the agent can fill it there, cannot use it
-// elsewhere, and never gets the value back from any tool or the audit log.
+// elsewhere or in the wrong field, cannot read the store through the browser's
+// account, and never gets the value back from any tool or the audit log.
 func TestSecretNeverReachesTheModel(t *testing.T) {
 	e := setupHost(t)
-	value := fmt.Sprintf("Kv-%d-s3cr3t", time.Now().UnixNano())
-	script(t, value, "secret.sh", "set", "e2e-secret", "https://httpbin.org")
+	value := fmt.Sprintf("kv-%d-s3cr3t@example.com", time.Now().UnixNano())
+	script(t, value, "secret.sh", "set", "--field", "text", "e2e-secret", "https://httpbin.org")
 	t.Cleanup(func() { script(t, "", "secret.sh", "delete", "e2e-secret") })
 
 	leaks := func(out string) {
@@ -123,9 +124,21 @@ func TestSecretNeverReachesTheModel(t *testing.T) {
 	t.Cleanup(func() { script(t, "", "secret.sh", "delete", "e2e-other") })
 	e.call("browser_navigate", map[string]any{"url": "https://httpbin.org/forms/post"}, false)
 	page, _ := e.call("browser_read_page", nil, false)
-	field := element(t, page, `"custtel"`)
+	field := element(t, page, `"custemail"`)
 	out, _ = e.call("secrets_fill", map[string]any{"name": "e2e-other", "element": field}, true)
 	e.mustContain(out, "may only be used on https://example.com")
+	leaks(out)
+
+	// A password credential only goes into a password field.
+	script(t, value, "secret.sh", "set", "e2e-password", "https://httpbin.org")
+	t.Cleanup(func() { script(t, "", "secret.sh", "delete", "e2e-password") })
+	out, _ = e.call("secrets_fill", map[string]any{"name": "e2e-password", "element": field}, true)
+	e.mustContain(out, "not a password field")
+	leaks(out)
+
+	// No credential goes into a field a site would publish.
+	out, _ = e.call("secrets_fill", map[string]any{"name": "e2e-secret", "element": element(t, page, `"comments"`)}, true)
+	e.mustContain(out, "not an input field")
 	leaks(out)
 
 	// Filled on its own site, hidden from the page reader.
@@ -140,6 +153,11 @@ func TestSecretNeverReachesTheModel(t *testing.T) {
 	e.call("browser_click", map[string]any{"element": element(t, page, `button "Submit order"`)}, false)
 	echo, _ := e.call("browser_read_page", nil, false)
 	e.mustContain(echo, value)
+
+	// The browser's account cannot read the store.
+	if status := strings.TrimSpace(admin(t, "doas -u agent cat /var/lib/kivora-vault/secrets.json >/dev/null 2>&1; echo $?")); status == "0" {
+		t.Fatal("the desktop account can read the credentials")
+	}
 
 	if n := strings.TrimSpace(admin(t, "doas grep -rc "+value+" /home/agent/.local/state/kivora/audit | grep -v ':0$' | wc -l")); n != "0" {
 		t.Fatalf("secret value found in %s audit file(s)", n)
