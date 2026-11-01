@@ -265,7 +265,8 @@ On the server:
 
 ```sh
 scripts/vm/authorize-key.sh ~/laptop_id_ed25519.pub   # the laptop's public key
-scripts/vm/ssh-config.sh 192.168.1.66                 # how the laptop reaches the server
+scripts/vm/jump-account.sh ~/laptop_id_ed25519.pub    # prints the commands creating a jump account
+scripts/vm/ssh-config.sh 192.168.1.66 kivora-jump     # how the laptop reaches the server
 scripts/vm/web-url.sh                                 # one-time sign-in URL
 scripts/vm/web-url.sh --rotate                        # new token, signs out every browser
 ```
@@ -276,6 +277,10 @@ On the laptop, add the output of `ssh-config.sh` to `~/.ssh/config`, then:
 ssh -N kivoradesk          # keeps the tunnel open
 open "http://localhost:6080/?token=…"   # the URL from web-url.sh, once
 ```
+
+The jump account has no shell and can only forward to the VM's SSH port. Without
+it, `ssh-config.sh` uses your own account on the server, which can administer it:
+the agent running on the laptop would inherit that access.
 
 The input owner survives a restart of the gateway or of the VM: if the agent did
 not own the desktop, it stays paused until you hand control back.

@@ -4,7 +4,8 @@
 #
 # usage: ssh-config.sh HOST_ADDRESS [HOST_USER]
 #   HOST_ADDRESS  how the laptop reaches this host (LAN IP, VPN IP or name)
-#   HOST_USER     account on this host (default: current user)
+#   HOST_USER     account on this host (default: current user); prefer one
+#                 limited to this jump, see jump-account.sh
 set -euo pipefail
 source "$(dirname "$0")/common.sh"
 
