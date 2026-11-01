@@ -82,6 +82,9 @@ done
 # ARP probe for conflicts, which holds every service back for 5 s at boot.
 grep -qx noarp /etc/dhcpcd.conf 2>/dev/null || echo noarp >>/etc/dhcpcd.conf
 
+# Empty /tmp at boot: Chromium leaves directories there when it crashes.
+sed -i 's/^wipe_tmp=.*/wipe_tmp="YES"/' /etc/conf.d/bootmisc
+
 # Boot without waiting at the boot menu.
 [ -f /boot/limine/limine.conf ] && sed -i 's/^timeout: .*/timeout: 1/' /boot/limine/limine.conf
 
