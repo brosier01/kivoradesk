@@ -2,35 +2,23 @@ package main
 
 import (
 	"encoding/json"
-	"os"
-	"path/filepath"
 	"regexp"
-	"strings"
-	"sync"
 	"time"
 )
 
-// auditLog appends one JSON line per tool call to a file per day
-// (audit-YYYY-MM-DD.jsonl), and deletes files older than the retention.
+// auditSink stores one line. In production, it is a helper running as another
+// account (internal/audit), which keeps the log out of the agent's reach.
+type auditSink interface {
+	Append(line []byte) error
+}
+
+// auditLog writes one JSON line per tool call.
 type auditLog struct {
-	dir       string
-	retention time.Duration
-
-	mu   sync.Mutex
-	day  string
-	file *os.File
+	sink auditSink
 }
 
-func openAudit(dir string, retention time.Duration) (*auditLog, error) {
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return nil, err
-	}
-	a := &auditLog{dir: dir, retention: retention}
-	a.prune(time.Now())
-	return a, nil
-}
-
-func (a *auditLog) record(trace, tool string, in any, err error, d time.Duration) {
+// record returns an error if the entry could not be stored.
+func (a *auditLog) record(trace, tool string, in any, err error, d time.Duration) error {
 	args, _ := json.Marshal(in)
 	entry := map[string]any{
 		"time": time.Now().UTC().Format(time.RFC3339Nano), "trace": trace, "tool": tool,
@@ -40,43 +28,7 @@ func (a *auditLog) record(trace, tool string, in any, err error, d time.Duration
 		entry["error"] = truncate(redact(err.Error()), 2000)
 	}
 	line, _ := json.Marshal(entry)
-
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	now := time.Now().UTC()
-	if day := now.Format("2006-01-02"); day != a.day {
-		if a.file != nil {
-			a.file.Close()
-		}
-		f, err := os.OpenFile(filepath.Join(a.dir, "audit-"+day+".jsonl"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
-		if err != nil {
-			a.file, a.day = nil, ""
-			return
-		}
-		a.file, a.day = f, day
-		a.prune(now)
-	}
-	a.file.Write(append(line, '\n'))
-}
-
-// prune deletes daily files older than the retention.
-func (a *auditLog) prune(now time.Time) {
-	files, _ := filepath.Glob(filepath.Join(a.dir, "audit-*.jsonl"))
-	for _, f := range files {
-		day, err := time.Parse("2006-01-02", strings.TrimSuffix(strings.TrimPrefix(filepath.Base(f), "audit-"), ".jsonl"))
-		if err == nil && now.Sub(day) > a.retention {
-			os.Remove(f)
-		}
-	}
-}
-
-func (a *auditLog) Close() error {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.file == nil {
-		return nil
-	}
-	return a.file.Close()
+	return a.sink.Append(append(line, '\n'))
 }
 
 // secretPatterns match credentials that commonly appear in commands and URLs.

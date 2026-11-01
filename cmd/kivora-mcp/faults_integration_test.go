@@ -163,7 +163,7 @@ func TestSecretNeverReachesTheModel(t *testing.T) {
 		t.Fatal("the desktop account can read the credentials")
 	}
 
-	if n := strings.TrimSpace(admin(t, "doas grep -rc "+value+" /home/agent/.local/state/kivora/audit | grep -v ':0$' | wc -l")); n != "0" {
+	if n := strings.TrimSpace(admin(t, "doas grep -rc "+value+" /var/lib/kivora-audit | grep -v ':0$' | wc -l")); n != "0" {
 		t.Fatalf("secret value found in %s audit file(s)", n)
 	}
 }
@@ -208,6 +208,16 @@ func TestLocalServicesByAccount(t *testing.T) {
 	}
 	if status("doas -u agent sh -c 'echo x >>/etc/ssh/authorized_keys/agent'") == "0" {
 		t.Error("the desktop account can change its SSH keys")
+	}
+	for _, command := range []string{
+		"doas -u agent cat /var/lib/kivora-audit/audit-$(date -u +%F).jsonl",
+		"doas -u agent sh -c 'echo x >>/var/lib/kivora-audit/audit-$(date -u +%F).jsonl'",
+		"doas -u agent doas -u kivora-audit /usr/local/bin/kivora-audit",
+		"doas -u agent doas -u worker /usr/lib/ssh/sftp-server -d /etc",
+	} {
+		if status(command) == "0" {
+			t.Errorf("the desktop account can run: %s", command)
+		}
 	}
 	if status("doas -u agent test -e /home/agent/.ssh/authorized_keys") == "0" {
 		t.Error("an SSH key file is left in the home of the desktop account")
@@ -286,5 +296,16 @@ func TestWorkerProcessesEndWithTheirCall(t *testing.T) {
 	out, _ = e.call("shell_run", map[string]any{"command": "ps -o args | grep -c '[s]leep 271'; true"}, false)
 	if !regexp.MustCompile(`(?m)^0$`).MatchString(out) {
 		t.Fatalf("a detached process outlived its call:\n%s", out)
+	}
+}
+
+// TestAuditLogRecordsCalls checks that calls reach the log, out of the agent's
+// reach.
+func TestAuditLogRecordsCalls(t *testing.T) {
+	e := setupHost(t)
+	e.call("computer_get_state", nil, false)
+	count := strings.TrimSpace(admin(t, `doas sh -c 'grep -c "\"tool\":\"computer_get_state\"" /var/lib/kivora-audit/audit-$(date -u +%F).jsonl'`))
+	if count == "0" || count == "" {
+		t.Fatalf("the call is not in the audit log: %q", count)
 	}
 }

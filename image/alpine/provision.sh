@@ -23,6 +23,10 @@ VAULT_UID=${VAULT_UID:-1102}
 VAULT_DIR=/var/lib/kivora-vault
 # The agent's SSH keys, on the data disk but out of its reach.
 KEYS_DIR=/etc/ssh/authorized_keys
+# The audit log, on the data disk, out of the agent's reach.
+AUDIT_USER=${AUDIT_USER:-kivora-audit}
+AUDIT_UID=${AUDIT_UID:-1103}
+AUDIT_DIR=/var/lib/kivora-audit
 WORKSPACE=${WORKSPACE:-/workspace}
 DATA_DIR=/data
 DATA_SERIAL=kivora-data
@@ -133,7 +137,11 @@ if ! id "$VAULT_USER" >/dev/null 2>&1; then
 	log "creating unprivileged user $VAULT_USER"
 	adduser -D -H -u "$VAULT_UID" -h "$VAULT_DIR" -s /sbin/nologin -g "KivoraDesk credentials" "$VAULT_USER"
 fi
-mkdir -p "$VAULT_DIR" "$KEYS_DIR"
+if ! id "$AUDIT_USER" >/dev/null 2>&1; then
+	log "creating unprivileged user $AUDIT_USER"
+	adduser -D -H -u "$AUDIT_UID" -h "$AUDIT_DIR" -s /sbin/nologin -g "KivoraDesk audit log" "$AUDIT_USER"
+fi
+mkdir -p "$VAULT_DIR" "$KEYS_DIR" "$AUDIT_DIR"
 
 disk=$(data_disk)
 if [ -n "$disk" ]; then
@@ -155,19 +163,32 @@ if [ -n "$disk" ]; then
 	bind_to_data "$WORKSPACE"
 	bind_to_data "$VAULT_DIR"
 	bind_to_data "$KEYS_DIR"
+	bind_to_data "$AUDIT_DIR"
 else
 	log "no data disk (serial $DATA_SERIAL): keeping data on the system disk"
 fi
 
 # A data disk from an older VM may carry other UIDs.
-for entry in "$AGENT_USER:/home/$AGENT_USER" "$AGENT_USER:$WORKSPACE" "$WORKER_USER:/home/$WORKER_USER" "$VAULT_USER:$VAULT_DIR"; do
+for entry in "$AGENT_USER:/home/$AGENT_USER" "$AGENT_USER:$WORKSPACE" "$WORKER_USER:/home/$WORKER_USER" "$VAULT_USER:$VAULT_DIR" "$AUDIT_USER:$AUDIT_DIR"; do
 	user=${entry%%:*} dir=${entry#*:}
 	if [ -d "$dir" ] && [ "$(stat -c %u "$dir")" != "$(id -u "$user")" ]; then
 		log "fixing ownership of $dir"
 		chown -Rh "$user:$user" "$dir"
 	fi
 done
-chmod 0700 "/home/$AGENT_USER" "/home/$WORKER_USER" "$VAULT_DIR"
+chmod 0700 "/home/$AGENT_USER" "/home/$WORKER_USER" "$VAULT_DIR" "$AUDIT_DIR"
+
+# The audit log used to live in the agent's home, where it could rewrite it.
+old_audit=/home/$AGENT_USER/.local/state/kivora/audit
+if [ -d "$old_audit" ]; then
+	log "moving the audit log to the $AUDIT_USER account"
+	if su -s /bin/sh "$AGENT_USER" -c "cd '$old_audit' && tar -cf - audit-*.jsonl" 2>/dev/null |
+		su -s /bin/sh "$AUDIT_USER" -c "tar -C '$AUDIT_DIR' -xf -" 2>/dev/null; then
+		su -s /bin/sh "$AGENT_USER" -c "rm -rf '$old_audit'"
+	else
+		log "warning: could not move $old_audit: left in place"
+	fi
+fi
 
 # Credentials used to live in the agent's home, where the browser could read
 # them. Each step runs as the account concerned: root must not follow a link

@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/brosier01/kivoradesk/internal/audit"
 	"github.com/brosier01/kivoradesk/internal/browser"
 	"github.com/brosier01/kivoradesk/internal/control"
 	"github.com/brosier01/kivoradesk/internal/desktop"
@@ -31,14 +32,10 @@ func connect(t *testing.T, owner control.Owner) (*mcp.ClientSession, *control.St
 	go httpSrv.Serve(ln)
 	t.Cleanup(func() { httpSrv.Close() })
 
-	audit, err := openAudit(t.TempDir(), time.Hour)
-	if err != nil {
-		t.Fatal(err)
-	}
 	s := &server{
 		ctl:   control.NewClient(sock),
 		desk:  &desktop.Desktop{Display: ":99", Width: 1280, Height: 800, ShotDir: t.TempDir()},
-		audit: audit,
+		audit: &auditLog{sink: &audit.Log{Dir: t.TempDir(), Retention: 48 * time.Hour}},
 	}
 	srv := mcp.NewServer(&mcp.Implementation{Name: "kivoradesk"}, &mcp.ServerOptions{Instructions: instructions})
 	s.register(srv)

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 
@@ -65,9 +66,16 @@ func add[In any](srv *mcp.Server, s *server, k kind, tool *mcp.Tool, h handler[I
 		if err != nil {
 			err = errors.New(s.filled.clean(err.Error()))
 		}
-		s.audit.record(trace, tool.Name, in, err, time.Since(start))
+		warning := ""
+		if auditErr := s.audit.record(trace, tool.Name, in, err, time.Since(start)); auditErr != nil {
+			log.Printf("audit: %v", auditErr)
+			warning = fmt.Sprintf("Warning: this call is not in the audit log (%v). Tell the human.", auditErr)
+		}
 		if err != nil {
-			return nil, nil, fmt.Errorf("%v [trace %s]", err, trace)
+			return nil, nil, fmt.Errorf("%v [trace %s] %s", err, trace, warning)
+		}
+		if warning != "" {
+			content = append(content, &mcp.TextContent{Text: warning})
 		}
 		for _, c := range content {
 			if t, ok := c.(*mcp.TextContent); ok {
