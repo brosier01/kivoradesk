@@ -19,6 +19,7 @@ command_args="
 	--hide-crash-restore-bubble
 	--window-position=0,0
 	--window-size=${geometry%x*},${geometry#*x}
+	$KIVORA_BROWSER_FLAGS
 	about:blank"
 command_user="$KIVORA_USER:$KIVORA_USER"
 directory="/home/$KIVORA_USER"
