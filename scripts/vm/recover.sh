@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Rebuild the VM's system disk from the reference image ("recover"), keeping
 # the data disk. Use it when the system is broken. Running work is
-# interrupted, and the web gateway gets a new sign-in token.
+# interrupted, and browsers must sign in to the web gateway again.
 #
 # usage: recover.sh --yes
 set -euo pipefail

@@ -10,6 +10,7 @@ package main
 
 import (
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"regexp"
@@ -176,7 +177,7 @@ func TestBrowserLockdown(t *testing.T) {
 	id := regexp.MustCompile(`Tab (\S+):`).FindStringSubmatch(out)[1]
 	t.Cleanup(func() { e.call("browser_close_tab", map[string]any{"id": id}, false) })
 
-	for _, u := range []string{"file:///etc/passwd", "chrome://version", "view-source:https://example.com", "http://127.0.0.1:9222/json/version"} {
+	for _, u := range []string{"file:///etc/passwd", "chrome://version", "view-source:https://example.com", "http://127.0.0.1:9222/json/version", "http://kivora.localhost:6080/"} {
 		e.call("computer_key", map[string]any{"keys": "ctrl+l"}, false)
 		e.call("computer_type", map[string]any{"text": u + "\n"}, false)
 		time.Sleep(time.Second)
@@ -342,5 +343,36 @@ func TestShellReachesOnlyAllowedSites(t *testing.T) {
 	}
 	if status("curl -sS -m 5 --noproxy '*' https://example.com") == "0" {
 		t.Error("an allowed site is reachable without the proxy")
+	}
+}
+
+// TestSignInLink checks what web-url.sh prints: a link that works once, and no
+// permanent token left on the VM.
+func TestSignInLink(t *testing.T) {
+	e := setupHost(t)
+	link := strings.TrimSpace(script(t, "", "web-url.sh"))
+	code, ok := strings.CutPrefix(link, "http://kivora.localhost:6080/login?code=")
+	if !ok || len(code) != 64 {
+		t.Fatalf("web-url.sh printed %q", link)
+	}
+	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	get := func(url string) *http.Response {
+		t.Helper()
+		resp, err := client.Get(url)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp
+	}
+	first := get(e.web + "/login?code=" + code)
+	if first.StatusCode != http.StatusSeeOther || len(first.Cookies()) != 1 || first.Cookies()[0].Value == code {
+		t.Fatalf("first use: %s %v", first.Status, first.Cookies())
+	}
+	if second := get(e.web + "/login?code=" + code); second.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("second use: %s", second.Status)
+	}
+	if status := strings.TrimSpace(admin(t, "doas test -e /var/lib/kivora-web/token; echo $?")); status == "0" {
+		t.Fatal("a permanent token is left on the VM")
 	}
 }
