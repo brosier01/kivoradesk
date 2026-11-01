@@ -186,3 +186,28 @@ func TestBrowserLockdown(t *testing.T) {
 	page, _ := e.call("browser_read_page", nil, false)
 	e.mustContain(page, "Example Domain")
 }
+
+// TestLocalServicesByAccount checks who may reach what: VNC is the gateway's,
+// DevTools the agent's, and the agent cannot change its own SSH keys.
+func TestLocalServicesByAccount(t *testing.T) {
+	setupHost(t)
+	status := func(command string) string {
+		t.Helper()
+		return strings.TrimSpace(admin(t, command+" >/dev/null 2>&1; echo $?"))
+	}
+	if status("doas -u agent nc -z -w2 127.0.0.1 5900") == "0" {
+		t.Error("the desktop account reaches VNC")
+	}
+	if status("doas -u agent nc -z -w2 127.0.0.1 9222") != "0" {
+		t.Error("the desktop account does not reach DevTools")
+	}
+	if status("doas -u kivora-vault nc -z -w2 127.0.0.1 9222") == "0" {
+		t.Error("the vault account reaches DevTools")
+	}
+	if status("doas -u agent sh -c 'echo x >>/etc/ssh/authorized_keys/agent'") == "0" {
+		t.Error("the desktop account can change its SSH keys")
+	}
+	if status("doas -u agent test -e /home/agent/.ssh/authorized_keys") == "0" {
+		t.Error("an SSH key file is left in the home of the desktop account")
+	}
+}
