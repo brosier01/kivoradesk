@@ -1,7 +1,7 @@
 //go:build integration
 
 // Tests that need the server's admin scripts (scripts/vm): fault injection
-// (PRD scenario 7: Chromium is killed, the VM loses Internet) and secrets.
+// (Chromium is killed, the VM loses Internet) and secrets.
 // They run only with KIVORA_HOST_SCRIPTS=1, on the server that hosts the VM:
 //
 //	KIVORA_HOST_SCRIPTS=1 KIVORA_MCP_COMMAND=... KIVORA_WEB_URL=... KIVORA_WEB_TOKEN=... \

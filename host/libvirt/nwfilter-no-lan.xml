@@ -2,7 +2,7 @@
   KivoraDesk network isolation, applied by libvirt to the VM's interface.
 
   The VM may open connections to the Internet, but not to private networks:
-  the host, the homelab LAN, VPNs (WireGuard, Tailscale) or other VMs. Only
+  the host, the local network, VPNs (WireGuard, Tailscale) or other VMs. Only
   DNS and DHCP on the libvirt gateway are allowed, plus the private services
   listed in the allowlist (scripts/vm/allow.sh). Connections opened by the
   host to the VM (SSH) keep working because only NEW outgoing traffic is
