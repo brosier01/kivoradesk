@@ -1,5 +1,5 @@
 // Command kivora-scenarios measures how reliably complete workflows run on
-// KivoraDesk (PRD goal: at least 90 % over 30 integration scenarios).
+// KivoraDesk (goal: at least 90 % over 30 integration scenarios).
 //
 // It drives the real MCP server over SSH, like a laptop, with scripted tool
 // sequences: no model is involved, so the result measures the computer, not

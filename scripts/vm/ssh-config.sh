@@ -14,7 +14,7 @@ host_addr=$1
 host_user=${2:-$(id -un)}
 
 cat <<EOF
-# KivoraDesk: the homelab host, used as a jump host.
+# KivoraDesk: the server hosting the VM, used as a jump host.
 Host $VM_NAME-host
     HostName $host_addr
     User $host_user

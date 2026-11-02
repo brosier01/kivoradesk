@@ -15,8 +15,10 @@ mkdir -p "$stage/rootfs/usr/local/bin"
 
 log "building guest binaries"
 version=$(git -C "$REPO_ROOT" describe --always --dirty 2>/dev/null || echo dev)
+# GOTOOLCHAIN=auto: the Go of a distribution may be older than go.mod, and may be
+# set up not to fetch the right one by itself.
 for cmd in kivora-web kivora-mcp kivora-vault kivora-audit kivora-proxy; do
-	(cd "$REPO_ROOT" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+	(cd "$REPO_ROOT" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOTOOLCHAIN=auto \
 		go build -trimpath -ldflags="-s -w -X main.version=$version" -o "$stage/rootfs/usr/local/bin/$cmd" "./cmd/$cmd")
 done
 

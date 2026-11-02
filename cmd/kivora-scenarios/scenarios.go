@@ -430,7 +430,7 @@ var scenarios = []scenario{
 	{name: "worker_isolation", run: func(r *runner) error {
 		out, err := r.call("shell_run", map[string]any{"command": "id -un; cat /home/agent/.Xauthority >/dev/null 2>&1 && echo LEAK-X; " +
 			"wget -q -T 3 -O- http://127.0.0.1:9222/json/version >/dev/null 2>&1 && echo LEAK-CDP; " +
-			"wget -q -T 3 -O- http://192.168.1.1/ >/dev/null 2>&1 && echo LEAK-LAN; " +
+			"gw=$(ip -4 route show default | awk '{print $3; exit}'); nc -z -w2 $gw 53 && echo LEAK-LAN; " +
 			"cat /var/lib/kivora-vault/secrets.json >/dev/null 2>&1 && echo LEAK-VAULT; " +
 			"ls /var/lib/kivora-audit >/dev/null 2>&1 && echo LEAK-AUDIT; " +
 			"nc -z -w2 127.0.0.1 5900 && echo LEAK-VNC; nc -z -w2 127.0.0.1 6080 && echo LEAK-WEB; " +
@@ -613,12 +613,16 @@ var scenarios = []scenario{
 }
 
 const (
+	// Everything but SSH replies and DNS: the Internet is gone, whatever network
+	// the VM is on, while the MCP session stays up.
 	cutInternet = `doas nft -f - <<'EOF'
 table inet kivoradesk_fault {
 	chain output {
 		type filter hook output priority filter; policy accept;
 		oifname "lo" accept
-		ip daddr != 192.168.122.0/24 reject
+		tcp sport 22 accept
+		udp dport 53 accept
+		reject
 	}
 }
 EOF`
