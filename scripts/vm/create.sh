@@ -3,9 +3,10 @@
 set -euo pipefail
 source "$(dirname "$0")/common.sh"
 
-command -v xorriso >/dev/null || die "xorriso is required to build the cloud-init seed"
-command -v qemu-img >/dev/null || die "qemu-img is required"
-command -v gpgv >/dev/null || die "gpgv is required to verify the base image"
+if ! report=$("$(dirname "$0")/check-host.sh"); then
+	printf '%s\n' "$report" >&2
+	die "this machine is not ready to host the VM"
+fi
 
 if virsh_ dominfo "$VM_NAME" >/dev/null 2>&1; then
 	die "VM '$VM_NAME' already exists (scripts/vm/destroy.sh to remove it)"
@@ -89,7 +90,6 @@ fi
 log "defining network filter $NWFILTER"
 define_nwfilter
 
-log "reserving $VM_IP on network $LIBVIRT_NETWORK"
 # Some distributions leave libvirt's default network stopped.
 if [[ $(virsh_ net-info "$LIBVIRT_NETWORK" | awk '/^Active:/ { print $2 }') != yes ]]; then
 	log "starting network $LIBVIRT_NETWORK"
@@ -97,6 +97,7 @@ if [[ $(virsh_ net-info "$LIBVIRT_NETWORK" | awk '/^Active:/ { print $2 }') != y
 	virsh_ net-autostart "$LIBVIRT_NETWORK" >/dev/null
 fi
 
+log "reserving $VM_IP on network $LIBVIRT_NETWORK"
 virsh_ net-update "$LIBVIRT_NETWORK" delete ip-dhcp-host "$(dhcp_host_xml)" --live --config >/dev/null 2>&1 || true
 virsh_ net-update "$LIBVIRT_NETWORK" add-last ip-dhcp-host "$(dhcp_host_xml)" --live --config >/dev/null
 
