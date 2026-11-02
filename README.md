@@ -21,7 +21,7 @@ over SSH. You can watch the desktop live and take over at any time.
 ## How it works
 
 ```text
-Laptop                              Homelab server (Linux, KVM)
+Laptop                              Server (Linux x86_64, KVM)
 ┌──────────────────────┐            ┌──────────────────────────────────────┐
 │ Claude Code          │── SSH ────▶│ VM "kivoradesk" (Alpine Linux)       │
 │  └ MCP client (stdio)│            │  ├ MCP server (kivora-mcp)           │
@@ -40,6 +40,77 @@ Laptop                              Homelab server (Linux, KVM)
   and keyboard; a human takeover pauses the agent.
 - **State survives.** Files, browser sessions and settings persist across
   reboots. Closing the laptop stops the agent, not the VM.
+
+## Install
+
+**The server** hosts the VM. It needs Linux on x86_64 with KVM (a cloud server must
+expose it), 2 vCPU, 4 GiB of memory for the VM and up to 32 GiB of disk. Tested on
+Ubuntu 24.04, Debian 13 and Fedora 44. macOS, Windows, FreeBSD and ARM cannot host
+the VM for now.
+
+**Your laptop** drives it. It needs OpenSSH and an MCP client such as Claude Code,
+on any system. It can also be the server itself.
+
+### On the server
+
+Install what the scripts use. On Debian or Ubuntu:
+
+```sh
+sudo apt install qemu-system-x86 qemu-utils libvirt-daemon-system libvirt-clients virtinst xorriso gnupg curl golang-go git
+```
+
+On Fedora:
+
+```sh
+sudo dnf install qemu-kvm qemu-img libvirt virt-install xorriso gnupg2 curl golang git
+sudo systemctl start virtqemud.socket virtnetworkd.socket virtnwfilterd.socket virtstoraged.socket
+```
+
+Then allow your account to use libvirt, and log out and back in:
+
+```sh
+sudo usermod -aG libvirt "$USER"
+```
+
+Create the VM. It takes a minute or two, and needs no sudo:
+
+```sh
+git clone https://github.com/brosier01/kivoradesk.git
+cd kivoradesk
+scripts/vm/check-host.sh        # says what is missing, if anything
+scripts/vm/create.sh            # download Alpine, check its signature, create the VM
+scripts/vm/provision.sh         # build the guest programs, install everything in the VM
+scripts/vm/doctor.sh            # every line should start with ok
+scripts/vm/check-isolation.sh   # the VM reaches the Internet, not your network
+```
+
+### On your laptop
+
+Give the server your public key, here with `ssh-keygen`'s default name (run
+`ssh-keygen -t ed25519` first if you have none):
+
+```sh
+scp ~/.ssh/id_ed25519.pub server.example.com:laptop_id_ed25519.pub
+```
+
+On the server, authorize it, create the jump account the laptop goes through, and
+print the laptop's SSH configuration:
+
+```sh
+scripts/vm/authorize-key.sh ~/laptop_id_ed25519.pub
+scripts/vm/jump-account.sh ~/laptop_id_ed25519.pub      # prints commands with sudo: read them, run them
+scripts/vm/ssh-config.sh server.example.com kivora-jump
+```
+
+Back on the laptop, add that configuration to `~/.ssh/config`, then register the MCP
+server with Claude Code:
+
+```sh
+claude mcp add --scope user kivoradesk -- ssh -o ClearAllForwardings=yes -T kivoradesk /usr/local/bin/kivora-mcp
+```
+
+Ask Claude Code, for example, to research a topic on the web and save the sources
+as PDFs in `/workspace`. To watch it, see [Live view](#live-view-from-the-laptop).
 
 ## MCP tools
 
@@ -109,17 +180,6 @@ Laptop                              Homelab server (Linux, KVM)
   Transfers run as `worker`, in `/workspace`: a link left there cannot lead to the
   agent's private files. `scp -O`, the old protocol, does not get this protection.
 
-## Use with Claude Code
-
-On the laptop, with the SSH configuration from `scripts/vm/ssh-config.sh`:
-
-```sh
-claude mcp add --scope user kivoradesk -- ssh -o ClearAllForwardings=yes -T kivoradesk /usr/local/bin/kivora-mcp
-```
-
-Then ask Claude Code, for example, to research a topic on the web and save the
-sources as PDFs in `/workspace`, while you watch it in the live view.
-
 ## Phase 0 results
 
 Measured inside the VM with `kivora-probe` (Alpine 3.24, Chromium 155,
@@ -152,7 +212,7 @@ minute.
 | 2 | MCP server: `computer`, `browser`, `shell`, `files`, `human`; agent/human lock; worker account | Done |
 | 3 | Robustness: fault recovery, timeouts, diagnostics, update/recover/reset, encrypted backups, audit retention, credentials, mobile view, network allowlist, scenario suite | Done |
 | 4 | Optimisation and published benchmarks | Done |
-| 5 | Installation guide and first release | Planned |
+| 5 | Installation guide and first public release | In progress |
 
 ## Repository layout
 
@@ -181,15 +241,11 @@ scripts/vm/         host-side scripts: create, provision, ssh, destroy, checks
 host/libvirt/       libvirt network filter isolating the VM
 ```
 
-## Development VM
+## The VM
 
-Requirements on the host: KVM, libvirt (`qemu:///system`, user in the
-`libvirt` group), `virt-install`, `qemu-img`, `xorriso`, GnuPG and Go. No sudo is
-needed: disks live in a libvirt-managed storage pool.
+Disks live in a libvirt-managed storage pool, so these scripts need no sudo.
 
 ```sh
-scripts/vm/create.sh                    # download Alpine, check its signature, create the VM
-scripts/vm/provision.sh                 # build the gateway, install desktop and services
 scripts/vm/ssh.sh                       # open a shell as the admin user
 scripts/vm/destroy.sh --yes --keep-data # rebuild the system, keep /home/agent and /workspace
 scripts/vm/destroy.sh --yes             # delete the VM and all its data
@@ -203,9 +259,9 @@ Settings (VM name, sizes, fixed IP, Alpine release, libvirt pool) can be
 overridden through the environment; see `scripts/vm/common.sh`. For a second VM,
 also set `VM_MAC`, `VM_IP` and `NWFILTER`: the network filter is shared by name,
 and redefining it applies at once to every VM using it. The VM gets a
-DHCP reservation (`192.168.122.50` by default) on the libvirt network. Data
-that must stay out of the repository (SSH key, image cache) lives in
-`~/.local/share/kivoradesk`.
+DHCP reservation for address `.50` on the libvirt network, `192.168.122.50` on a
+default libvirt setup. `scripts/vm/check-host.sh` prints it. Data that must stay out
+of the repository (SSH key, image cache) lives in `~/.local/share/kivoradesk`.
 
 Inside the VM:
 
@@ -237,7 +293,8 @@ optionally a CIDR and a TCP port), kept in `~/.local/share/kivoradesk/allowlist`
 on the host and applied to the running VM at once.
 
 Use `virsh shutdown --mode agent kivoradesk` for a clean shutdown: the Alpine
-virt image has no ACPI power button.
+virt image has no ACPI power button. The VM does not start by itself when the server
+boots, unless you run `virsh -c qemu:///system autostart kivoradesk`.
 
 ## Maintenance
 
@@ -289,21 +346,17 @@ owns the input: **agent**, **paused** or **human**. Viewer input only reaches
 the desktop while the human owns it; switching away releases any held key or
 button.
 
-On the server:
+On the laptop, once [installed](#on-your-laptop), keep the tunnel open:
 
 ```sh
-scripts/vm/authorize-key.sh ~/laptop_id_ed25519.pub   # the laptop's public key
-scripts/vm/jump-account.sh ~/laptop_id_ed25519.pub    # prints the commands creating a jump account
-scripts/vm/ssh-config.sh 192.168.1.66 kivora-jump     # how the laptop reaches the server
-scripts/vm/web-url.sh                                 # sign-in URL: works once, for 5 minutes
-scripts/vm/web-url.sh --rotate                        # also signs out every browser
+ssh -N kivoradesk
 ```
 
-On the laptop, add the output of `ssh-config.sh` to `~/.ssh/config`, then:
+On the server, get a sign-in URL and open it in the laptop's browser:
 
 ```sh
-ssh -N kivoradesk          # keeps the tunnel open
-open "http://kivora.localhost:6080/login?code=…"   # the URL from web-url.sh
+scripts/vm/web-url.sh            # works once, for 5 minutes
+scripts/vm/web-url.sh --rotate   # also signs out every browser
 ```
 
 The jump account has no shell and can only forward to the VM's SSH port. Without
@@ -323,8 +376,8 @@ also rejects non-loopback `Host` headers and cross-origin control requests.
 
 ## Scenario suite
 
-`kivora-scenarios` measures how reliably complete workflows run (PRD target:
-at least 90 % over 30 scenarios). It drives the real MCP server over SSH with
+`kivora-scenarios` measures how reliably complete workflows run (goal: at least
+90 % over 30 scenarios). It drives the real MCP server over SSH with
 scripted tool sequences, so it measures the computer, not a model's
 reasoning:
 
@@ -338,9 +391,13 @@ reasoning:
 | Human control | input lock, takeover request |
 | Persistence and faults | login kept across a browser restart, credentials, Chromium crash, Internet loss |
 
+Run it on the server, with a key authorized with `authorize-key.sh` and the gateway
+tunnel open. `VM_IP` is the address `scripts/vm/check-host.sh` prints:
+
 ```sh
+ssh -i $KEY -N -L 6080:127.0.0.1:6080 agent@$VM_IP &
 go build -o bin/kivora-scenarios ./cmd/kivora-scenarios
-bin/kivora-scenarios -mcp "ssh -i $KEY -T agent@192.168.122.50 /usr/local/bin/kivora-mcp" \
+bin/kivora-scenarios -mcp "ssh -i $KEY -T agent@$VM_IP /usr/local/bin/kivora-mcp" \
   -token "$(scripts/vm/ssh.sh 'doas -u kivora-web /usr/local/bin/kivora-web session')" \
   -scripts "$PWD/scripts/vm" -runs 10
 ```
@@ -368,7 +425,7 @@ bin/kivora-bench -compare before.json after.json
 Unit tests run anywhere: `go test ./...`.
 
 Integration tests run against the VM, with the gateway tunnel open
-(`ssh -N -L 6080:127.0.0.1:6080 agent@192.168.122.50` from the server, using
+(`ssh -N -L 6080:127.0.0.1:6080 agent@$VM_IP` from the server, using
 a key authorized with `authorize-key.sh`):
 
 ```sh
@@ -376,7 +433,7 @@ KEY=~/.local/share/kivoradesk/ssh/id_ed25519
 KIVORA_WEB_URL=http://localhost:6080 \
 KIVORA_WEB_TOKEN=$(scripts/vm/ssh.sh 'doas -u kivora-web /usr/local/bin/kivora-web session') \
 KIVORA_XDOTOOL="$PWD/scripts/vm/ssh.sh doas -u agent env DISPLAY=:1 xdotool" \
-KIVORA_MCP_COMMAND="ssh -i $KEY -T agent@192.168.122.50 /usr/local/bin/kivora-mcp" \
+KIVORA_MCP_COMMAND="ssh -i $KEY -T agent@$VM_IP /usr/local/bin/kivora-mcp" \
 go test -tags integration -p 1 ./cmd/...   # one at a time: they share the VM
 ```
 
@@ -402,6 +459,7 @@ Run `kivora-probe -h` for options (`-seed` for reproducible runs, `-json`).
 
 The project follows git flow (`main`, `develop`, `feature/*`, `release/*`,
 `hotfix/*`) and [Conventional Commits](https://www.conventionalcommits.org/).
+To report a vulnerability, see [SECURITY.md](SECURITY.md).
 
 ## Claude Code
 
