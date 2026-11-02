@@ -90,6 +90,13 @@ log "defining network filter $NWFILTER"
 define_nwfilter
 
 log "reserving $VM_IP on network $LIBVIRT_NETWORK"
+# Some distributions leave libvirt's default network stopped.
+if [[ $(virsh_ net-info "$LIBVIRT_NETWORK" | awk '/^Active:/ { print $2 }') != yes ]]; then
+	log "starting network $LIBVIRT_NETWORK"
+	virsh_ net-start "$LIBVIRT_NETWORK" >/dev/null
+	virsh_ net-autostart "$LIBVIRT_NETWORK" >/dev/null
+fi
+
 virsh_ net-update "$LIBVIRT_NETWORK" delete ip-dhcp-host "$(dhcp_host_xml)" --live --config >/dev/null 2>&1 || true
 virsh_ net-update "$LIBVIRT_NETWORK" add-last ip-dhcp-host "$(dhcp_host_xml)" --live --config >/dev/null
 
