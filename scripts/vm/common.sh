@@ -56,10 +56,11 @@ virsh_() { virsh --connect "$LIBVIRT_URI" "$@"; }
 
 dhcp_host_xml() { printf "<host mac='%s' name='%s' ip='%s'/>" "$VM_MAC" "$VM_NAME" "$VM_IP"; }
 
-# vm_ip prints the first IPv4 address leased to the VM, or nothing.
+# vm_ip prints the first IPv4 address leased to the VM, or nothing. awk reads to
+# the end: with pipefail, leaving early can kill virsh and the whole script.
 vm_ip() {
 	virsh_ domifaddr "$VM_NAME" --source lease 2>/dev/null |
-		awk '/ipv4/ { split($4, a, "/"); print a[1]; exit }'
+		awk '/ipv4/ && !ip { split($4, a, "/"); ip = a[1] } END { if (ip) print ip }'
 }
 
 # The VM's host key is kept once seen: these scripts run root commands in the

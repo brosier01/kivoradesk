@@ -16,7 +16,7 @@ targets+=("$gateway:22")
 for addr in $(ip -4 -o addr show scope global | awk '{split($4, a, "/"); print a[1]}'); do
 	[[ $addr == "$gateway" ]] || targets+=("$addr:22")
 done
-router=$(ip -4 route show default | awk '{print $3; exit}')
+router=$(ip -4 route show default | awk '!router { router = $3 } END { print router }')
 [[ -n $router ]] && targets+=("$router:53" "$router:80" "$router:443")
 
 failed=0
