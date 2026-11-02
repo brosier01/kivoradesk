@@ -71,7 +71,9 @@ table inet kivoradesk_fault {
 	chain output {
 		type filter hook output priority filter; policy accept;
 		oifname "lo" accept
-		ip daddr != 192.168.122.0/24 reject
+		tcp sport 22 accept
+		udp dport 53 accept
+		reject
 	}
 }
 EOF`)
