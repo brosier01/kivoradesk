@@ -11,7 +11,7 @@ reachable_from_host() { timeout 2 bash -c "</dev/tcp/$1/$2" 2>/dev/null; }
 reachable_from_vm() { "$(dirname "$0")/ssh.sh" "nc -z -w2 $1 $2" 2>/dev/null; }
 
 targets=()
-gateway=$(virsh_ net-dumpxml "$LIBVIRT_NETWORK" | sed -n "s/.*<ip address='\([0-9.]*\)'.*/\1/p" | head -n1)
+gateway=$(network_gateway)
 targets+=("$gateway:22")
 for addr in $(ip -4 -o addr show scope global | awk '{split($4, a, "/"); print a[1]}'); do
 	[[ $addr == "$gateway" ]] || targets+=("$addr:22")

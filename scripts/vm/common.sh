@@ -13,10 +13,9 @@ VM_DATA_GB=${VM_DATA_GB:-16}
 VM_ADMIN=${VM_ADMIN:-kivora}
 VM_AGENT=${VM_AGENT:-agent}
 
-# Fixed MAC and DHCP reservation, so the VM keeps the same address and the
-# laptop's SSH configuration stays valid across rebuilds.
+# Fixed MAC and DHCP reservation (VM_IP, set below), so the VM keeps the same
+# address and the laptop's SSH configuration stays valid across rebuilds.
 VM_MAC=${VM_MAC:-52:54:00:6b:64:01}
-VM_IP=${VM_IP:-192.168.122.50}
 
 # Port of the web gateway inside the VM.
 WEB_PORT=${WEB_PORT:-6080}
@@ -53,6 +52,20 @@ log() { printf '==> %s\n' "$*" >&2; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 
 virsh_() { virsh --connect "$LIBVIRT_URI" "$@"; }
+
+# network_gateway prints the IPv4 address of the libvirt network, or nothing.
+network_gateway() {
+	virsh_ net-dumpxml "$LIBVIRT_NETWORK" 2>/dev/null | awk -F"'" '/<ip address=/ && !gateway { gateway = $2 } END { if (gateway) print gateway }'
+}
+
+# default_vm_ip prints address .50 on the libvirt network, whatever its range.
+default_vm_ip() {
+	local gateway
+	gateway=$(network_gateway || true)
+	gateway=${gateway:-192.168.122.1}
+	printf '%s.50' "${gateway%.*}"
+}
+VM_IP=${VM_IP:-$(default_vm_ip)}
 
 dhcp_host_xml() { printf "<host mac='%s' name='%s' ip='%s'/>" "$VM_MAC" "$VM_NAME" "$VM_IP"; }
 
@@ -99,8 +112,7 @@ allow_rule() {
 # allowlist. libvirt applies a redefinition to the running VM at once.
 define_nwfilter() {
 	local xml gateway uuid rules="" entry
-	xml=$(virsh_ net-dumpxml "$LIBVIRT_NETWORK")
-	gateway=$(sed -n "s/.*<ip address='\([0-9.]*\)'.*/\1/p" <<<"$xml" | head -n1)
+	gateway=$(network_gateway)
 	[[ -n $gateway ]] || die "could not read the gateway address of network $LIBVIRT_NETWORK"
 	if [[ -f $KIVORA_ALLOWLIST ]]; then
 		while read -r entry _; do
