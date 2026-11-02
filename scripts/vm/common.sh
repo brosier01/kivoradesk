@@ -120,7 +120,7 @@ define_nwfilter() {
 			rules+=$(allow_rule "$entry")$'\n'
 		done <"$KIVORA_ALLOWLIST"
 	fi
-	xml=$(sed -e "s|@NWFILTER@|$NWFILTER|g" -e "s|@GATEWAY@|$gateway|g" "$REPO_ROOT/host/libvirt/nwfilter-no-lan.xml")
+	xml=$(sed -e "s|@NWFILTER@|$NWFILTER|g" -e "s|@GATEWAY@|$gateway|g" -e "s|@VM_IP@|$VM_IP|g" "$REPO_ROOT/host/libvirt/nwfilter-no-lan.xml")
 	# Redefining an existing filter must keep its UUID.
 	uuid=$({ virsh_ nwfilter-dumpxml "$NWFILTER" 2>/dev/null || true; } | sed -n 's|.*<uuid>\(.*\)</uuid>.*|\1|p')
 	if [[ -n $uuid ]]; then

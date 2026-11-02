@@ -11,11 +11,15 @@
   clean-traffic keeps the VM from taking the MAC or IP address of the gateway
   or of another VM, and drops everything but IPv4 and ARP, IPv6 included.
 
-  @NWFILTER@ is replaced by the name of the filter, and @GATEWAY@ by the libvirt
-  network gateway address.
+  @NWFILTER@ is replaced by the name of the filter, @GATEWAY@ by the libvirt
+  network gateway address and @VM_IP@ by the VM's reserved address. Without it,
+  libvirt learns the address from the VM's traffic, and blocks everything for good
+  if its filter daemon stops meanwhile, as it does by itself on Fedora.
 -->
 <filter name='@NWFILTER@' chain='root'>
-  <filterref filter='clean-traffic'/>
+  <filterref filter='clean-traffic'>
+    <parameter name='IP' value='@VM_IP@'/>
+  </filterref>
 
   <rule action='accept' direction='out' priority='100'>
     <udp dstipaddr='@GATEWAY@' dstportstart='53'/>
