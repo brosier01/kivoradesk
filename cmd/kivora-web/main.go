@@ -257,16 +257,23 @@ func (s *server) auth(next http.Handler) http.Handler {
 	})
 }
 
-// login trades a sign-in code for a session, in a strict same-site cookie, and
-// redirects to a clean URL.
+// login trades a sign-in code for a session, in a strict same-site cookie. The
+// code is only used up once the session exists, and a preview tool asking for the
+// headers does not use it up.
 func (s *server) login(w http.ResponseWriter, r *http.Request) {
-	if s.authorized(r) {
-		http.Redirect(w, r, "/", http.StatusSeeOther)
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if !s.sessions.redeem(r.URL.Query().Get("code")) {
-		w.WriteHeader(http.StatusUnauthorized)
-		io.WriteString(w, "This sign-in link is invalid, expired or already used. Get a new one on the server with: kivora web-url.\n")
+	code := r.URL.Query().Get("code")
+	if s.authorized(r) {
+		s.sessions.redeem(code) // the link works once, whoever opens it
+		signedIn(w)
+		return
+	}
+	if !s.sessions.pending(code) {
+		invalidLink(w)
 		return
 	}
 	session, err := s.sessions.issue(sessionsDir)
@@ -275,13 +282,38 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "could not create a session", http.StatusInternalServerError)
 		return
 	}
+	if !s.sessions.redeem(code) { // another request was first
+		s.sessions.revoke(session)
+		invalidLink(w)
+		return
+	}
 	http.SetCookie(w, &http.Cookie{
 		Name: cookieName, Value: session, Path: "/",
 		HttpOnly: true, SameSite: http.SameSiteStrictMode,
 		MaxAge: int(sessionTTL.Seconds()),
 	})
 	s.log.Info("signed in", "remote", r.RemoteAddr)
-	http.Redirect(w, r, "/", http.StatusSeeOther)
+	signedIn(w)
+}
+
+func invalidLink(w http.ResponseWriter) {
+	w.WriteHeader(http.StatusUnauthorized)
+	io.WriteString(w, "This sign-in link is invalid, expired or already used. Get a new one on the server with: kivora web-url.\n")
+}
+
+// signedIn answers with a page that moves to the viewer, not with a redirect. A
+// link opened from another site carries that site through its redirects, and a
+// strict cookie is not sent then. From this page, the browser comes from this site.
+func signedIn(w http.ResponseWriter) {
+	h := w.Header()
+	h.Set("Content-Type", "text/html; charset=utf-8")
+	h.Set("Cache-Control", "no-store")
+	io.WriteString(w, `<!doctype html>
+<meta charset="utf-8">
+<meta http-equiv="refresh" content="0; url=/">
+<title>KivoraDesk</title>
+<p>Signed in. <a href="/">Open the live view</a>.</p>
+`)
 }
 
 // page serves the viewer.

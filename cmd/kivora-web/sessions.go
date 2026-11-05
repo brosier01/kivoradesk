@@ -50,6 +50,15 @@ func (s *sessionStore) issue(kind string) (string, error) {
 	return secret, nil
 }
 
+// pending reports whether code is a valid sign-in code, without using it up.
+func (s *sessionStore) pending(code string) bool {
+	if code == "" {
+		return false
+	}
+	st, err := os.Stat(filepath.Join(s.dir, codesDir, hashName(code)))
+	return err == nil && time.Since(st.ModTime()) <= loginCodeTTL
+}
+
 // redeem reports whether code is a valid sign-in code, and uses it up.
 func (s *sessionStore) redeem(code string) bool {
 	if code == "" {
@@ -82,6 +91,11 @@ func (s *sessionStore) valid(secret string) bool {
 		return false
 	}
 	return true
+}
+
+// revoke ends one session.
+func (s *sessionStore) revoke(secret string) {
+	os.Remove(filepath.Join(s.dir, sessionsDir, hashName(secret)))
 }
 
 // signOutAll ends every session and cancels every code, at once.

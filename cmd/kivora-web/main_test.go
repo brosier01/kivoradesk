@@ -132,8 +132,11 @@ func TestSignInLinkWorksOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	w := get("/login?code="+code, "")
-	if w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/" {
-		t.Fatalf("sign-in = %d, %v", w.Code, w.Header())
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `http-equiv="refresh" content="0; url=/"`) {
+		t.Fatalf("sign-in = %d, %q", w.Code, w.Body)
+	}
+	if strings.Contains(w.Body.String(), code) || w.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("sign-in page: %q, %v", w.Body, w.Header())
 	}
 	cookies := w.Result().Cookies()
 	if len(cookies) != 1 || cookies[0].Name != cookieName || !cookies[0].HttpOnly || cookies[0].SameSite != http.SameSiteStrictMode {
