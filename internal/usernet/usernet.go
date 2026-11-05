@@ -14,6 +14,8 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -39,11 +41,16 @@ const (
 	mtu   = 1500
 	// A frame larger than this does not come from a VM with this MTU.
 	maxFrame = 1 << 16
-	// Each connection uses a file descriptor of the host.
-	maxFlows    = 4096
-	maxDNS      = 64
-	dialTimeout = 20 * time.Second
-	dnsTimeout  = 10 * time.Second
+	// Each connection of the VM costs this process a descriptor and its buffers.
+	// Both are the VM's to fill: with these, it can make this process hold about
+	// 2 GiB, whatever it does. A browser uses a few hundred at most.
+	maxFlows      = 1024
+	minTCPBuffer  = 4 << 10
+	dfltTCPBuffer = 128 << 10
+	maxTCPBuffer  = 1 << 20
+	maxDNS        = 64
+	dialTimeout   = 20 * time.Second
+	dnsTimeout    = 10 * time.Second
 	// Enough for a name with many addresses, within a 512-byte answer.
 	maxDNSAnswers = 16
 )
@@ -60,20 +67,23 @@ const gatewayMAC = tcpip.LinkAddress("\x52\x54\x00\x6b\x64\xfe")
 // blocked lists what is not the Internet. The addresses of this computer are
 // checked on top, since it may have a public one.
 var blocked = []netip.Prefix{
-	netip.MustParsePrefix("0.0.0.0/8"),       // "this network"
-	netip.MustParsePrefix("10.0.0.0/8"),      // private
-	netip.MustParsePrefix("100.64.0.0/10"),   // carrier-grade NAT, Tailscale
-	netip.MustParsePrefix("127.0.0.0/8"),     // loopback
-	netip.MustParsePrefix("169.254.0.0/16"),  // link-local, cloud metadata
-	netip.MustParsePrefix("172.16.0.0/12"),   // private
-	netip.MustParsePrefix("192.0.0.0/24"),    // protocol assignments
-	netip.MustParsePrefix("192.0.2.0/24"),    // documentation
-	netip.MustParsePrefix("192.168.0.0/16"),  // private
-	netip.MustParsePrefix("198.18.0.0/15"),   // benchmarks, some VPNs
-	netip.MustParsePrefix("198.51.100.0/24"), // documentation
-	netip.MustParsePrefix("203.0.113.0/24"),  // documentation
-	netip.MustParsePrefix("224.0.0.0/4"),     // multicast
-	netip.MustParsePrefix("240.0.0.0/4"),     // reserved, broadcast
+	netip.MustParsePrefix("0.0.0.0/8"),        // "this network"
+	netip.MustParsePrefix("10.0.0.0/8"),       // private
+	netip.MustParsePrefix("100.64.0.0/10"),    // carrier-grade NAT, Tailscale
+	netip.MustParsePrefix("127.0.0.0/8"),      // loopback
+	netip.MustParsePrefix("161.26.0.0/16"),    // IBM Cloud service network
+	netip.MustParsePrefix("168.63.129.16/32"), // Azure platform services
+	netip.MustParsePrefix("169.254.0.0/16"),   // link-local, cloud metadata
+	netip.MustParsePrefix("172.16.0.0/12"),    // private
+	netip.MustParsePrefix("192.0.0.0/24"),     // protocol assignments
+	netip.MustParsePrefix("192.0.2.0/24"),     // documentation
+	netip.MustParsePrefix("192.88.99.0/24"),   // 6to4 relays, deprecated
+	netip.MustParsePrefix("192.168.0.0/16"),   // private
+	netip.MustParsePrefix("198.18.0.0/15"),    // benchmarks, some VPNs
+	netip.MustParsePrefix("198.51.100.0/24"),  // documentation
+	netip.MustParsePrefix("203.0.113.0/24"),   // documentation
+	netip.MustParsePrefix("224.0.0.0/4"),      // multicast
+	netip.MustParsePrefix("240.0.0.0/4"),      // reserved, broadcast
 }
 
 // Allowed reports whether the VM may connect to ip: an IPv4 address on the
@@ -100,9 +110,16 @@ type Network struct {
 	// seconds. The VM decides how often it happens, and logs take disk space.
 	flowsWarned atomic.Int64
 
-	allow  func(netip.Addr, uint16) bool
-	dial   func(ctx context.Context, address string) (net.Conn, error)
-	lookup func(ctx context.Context, name string) ([]net.IP, error)
+	// The connections of the VM, to close when it goes away. A connection opened
+	// in an earlier generation was for a VM that has gone.
+	mu         sync.Mutex
+	open       map[net.Conn]struct{}
+	generation uint64
+
+	allow      func(netip.Addr, uint16) bool
+	resolvable func(netip.Addr) bool
+	dial       func(ctx context.Context, address string) (net.Conn, error)
+	lookup     func(ctx context.Context, name string) ([]net.IP, error)
 }
 
 // New starts the network. Connect the VM to it with Serve.
@@ -113,11 +130,13 @@ func New(log *slog.Logger) (*Network, error) {
 	}
 	d := net.Dialer{Timeout: dialTimeout}
 	n := &Network{
-		stack: s,
-		link:  link,
-		log:   log,
-		flows: make(chan struct{}, maxFlows),
-		allow: func(ip netip.Addr, _ uint16) bool { return Allowed(ip) },
+		stack:      s,
+		link:       link,
+		log:        log,
+		flows:      make(chan struct{}, maxFlows),
+		open:       map[net.Conn]struct{}{},
+		allow:      func(ip netip.Addr, _ uint16) bool { return Allowed(ip) },
+		resolvable: Allowed,
 		dial: func(ctx context.Context, address string) (net.Conn, error) {
 			return d.DialContext(ctx, "tcp4", address)
 		},
@@ -149,6 +168,14 @@ func newStack(ip netip.Addr, mac tcpip.LinkAddress) (*stack.Stack, *channel.Endp
 	if err := s.SetTransportProtocolOption(tcp.ProtocolNumber, &sack); err != nil {
 		return nil, nil, fmt.Errorf("TCP options: %s", err)
 	}
+	receive := tcpip.TCPReceiveBufferSizeRangeOption{Min: minTCPBuffer, Default: dfltTCPBuffer, Max: maxTCPBuffer}
+	if err := s.SetTransportProtocolOption(tcp.ProtocolNumber, &receive); err != nil {
+		return nil, nil, fmt.Errorf("TCP options: %s", err)
+	}
+	send := tcpip.TCPSendBufferSizeRangeOption{Min: minTCPBuffer, Default: dfltTCPBuffer, Max: maxTCPBuffer}
+	if err := s.SetTransportProtocolOption(tcp.ProtocolNumber, &send); err != nil {
+		return nil, nil, fmt.Errorf("TCP options: %s", err)
+	}
 	link := channel.New(1024, mtu, mac)
 	if err := s.CreateNIC(nicID, ethernet.New(link)); err != nil {
 		return nil, nil, fmt.Errorf("network interface: %s", err)
@@ -176,6 +203,10 @@ func addr(ip netip.Addr) tcpip.Address { return tcpip.AddrFrom4(ip.As4()) }
 // it before Serve.
 func (n *Network) SetPolicy(allow func(ip netip.Addr, port uint16) bool) { n.allow = allow }
 
+// SetResolvable replaces what decides which addresses the VM's name lookups may
+// return, Allowed by default. Call it before Serve.
+func (n *Network) SetResolvable(resolvable func(ip netip.Addr) bool) { n.resolvable = resolvable }
+
 // Close stops the network and every connection of the VM.
 func (n *Network) Close() {
 	n.link.Close()
@@ -190,9 +221,47 @@ func (n *Network) DialGuest(ctx context.Context, port uint16) (net.Conn, error) 
 
 // Serve exchanges Ethernet frames with the hypervisor over conn, until either
 // side stops. Each frame has a 4-byte big-endian length before it, the format
-// of QEMU's stream network backend.
+// of QEMU's stream network backend. The connections of the VM end with it: a far
+// end that sends nothing would otherwise keep them, and their slots, for ever.
 func (n *Network) Serve(ctx context.Context, conn net.Conn) error {
+	defer n.closeFlows()
 	return pump(ctx, conn, n.link)
+}
+
+func (n *Network) currentGeneration() uint64 {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.generation
+}
+
+// track records connections, unless their VM has gone since generation.
+func (n *Network) track(generation uint64, conns ...net.Conn) bool {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if generation != n.generation {
+		return false
+	}
+	for _, c := range conns {
+		n.open[c] = struct{}{}
+	}
+	return true
+}
+
+func (n *Network) untrack(conns ...net.Conn) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	for _, c := range conns {
+		delete(n.open, c)
+	}
+}
+
+func (n *Network) closeFlows() {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.generation++
+	for c := range n.open {
+		c.Close()
+	}
 }
 
 func pump(ctx context.Context, conn net.Conn, link *channel.Endpoint) error {
@@ -221,8 +290,16 @@ func readFrames(conn net.Conn, link *channel.Endpoint) error {
 			return err
 		}
 		length := binary.BigEndian.Uint32(size[:])
-		if length == 0 || length > maxFrame {
-			return fmt.Errorf("invalid frame of %d bytes", length)
+		// A frame that cannot be real is skipped: losing the link would leave the
+		// VM running without a network, and QEMU does not reconnect.
+		if length == 0 {
+			continue
+		}
+		if length > maxFrame {
+			if _, err := io.CopyN(io.Discard, r, int64(length)); err != nil {
+				return err
+			}
+			continue
 		}
 		frame := make([]byte, length)
 		if _, err := io.ReadFull(r, frame); err != nil {
@@ -256,6 +333,7 @@ func writeFrames(ctx context.Context, conn net.Conn, link *channel.Endpoint) err
 // is allowed. The connection is only accepted once the other end has, so the VM
 // sees a refusal as a refusal.
 func (n *Network) forward(r *tcp.ForwarderRequest) {
+	generation := n.currentGeneration()
 	id := r.ID()
 	ip, ok := netip.AddrFromSlice(id.LocalAddress.AsSlice())
 	if !ok || !n.allow(ip, id.LocalPort) {
@@ -292,6 +370,10 @@ func (n *Network) forward(r *tcp.ForwarderRequest) {
 	r.Complete(false)
 	in := gonet.NewTCPConn(&wq, ep)
 	defer in.Close()
+	if !n.track(generation, in, out) {
+		return
+	}
+	defer n.untrack(in, out)
 	relay.Join(in, out)
 }
 
@@ -323,8 +405,10 @@ func (n *Network) serveDNS(conn *gonet.UDPConn) {
 }
 
 // answer builds the reply to a DNS query, or nil to ignore it. The VM only has
-// IPv4 and only needs addresses: other types get an empty answer. A name may
-// resolve to a private address: the connection is what gets refused.
+// IPv4 and only needs addresses: other types get an empty answer. A name of one
+// label, or one that only resolves to what the VM may not reach, does not exist:
+// its address would tell the VM about the networks around it. The connection
+// remains what is really refused, whatever a name resolves to later.
 func (n *Network) answer(ctx context.Context, query []byte) []byte {
 	var p dnsmessage.Parser
 	h, err := p.Start(query)
@@ -340,8 +424,17 @@ func (n *Network) answer(ctx context.Context, query []byte) []byte {
 		Questions: []dnsmessage.Question{q},
 	}
 	if q.Class == dnsmessage.ClassINET && q.Type == dnsmessage.TypeA {
+		name := q.Name.String()
+		if strings.Count(name, ".") < 2 {
+			reply.RCode = dnsmessage.RCodeNameError
+			out, err := reply.Pack()
+			if err != nil {
+				return nil
+			}
+			return out
+		}
 		// The final dot keeps the host's search domains out of the lookup.
-		ips, err := n.lookup(ctx, q.Name.String())
+		ips, err := n.lookup(ctx, name)
 		var dnsErr *net.DNSError
 		switch {
 		case errors.As(err, &dnsErr) && dnsErr.IsNotFound:
@@ -349,15 +442,23 @@ func (n *Network) answer(ctx context.Context, query []byte) []byte {
 		case err != nil:
 			reply.RCode = dnsmessage.RCodeServerFailure
 		}
+		hidden := false
 		for _, ip := range ips {
 			v4 := ip.To4()
 			if v4 == nil || len(reply.Answers) == maxDNSAnswers {
+				continue
+			}
+			if !n.resolvable(netip.AddrFrom4([4]byte(v4))) {
+				hidden = true
 				continue
 			}
 			reply.Answers = append(reply.Answers, dnsmessage.Resource{
 				Header: dnsmessage.ResourceHeader{Name: q.Name, Type: dnsmessage.TypeA, Class: dnsmessage.ClassINET, TTL: 60},
 				Body:   &dnsmessage.AResource{A: [4]byte(v4)},
 			})
+		}
+		if hidden && len(reply.Answers) == 0 {
+			reply.RCode = dnsmessage.RCodeNameError
 		}
 	}
 	out, err := reply.Pack()
