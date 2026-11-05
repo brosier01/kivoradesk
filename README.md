@@ -61,7 +61,9 @@ docker compose up -d --wait
 ```
 
 The first time takes a few minutes: it builds the image, with Alpine checked against
-its signature, creates the VM inside the container and installs everything in it.
+its signature, creates the VM inside the container and installs everything in it. If
+Docker says `/dev/kvm` does not exist, KVM is not available on this machine: turn on
+virtualization in its firmware settings, or choose a cloud server that exposes it.
 Then check the result:
 
 ```sh
@@ -254,8 +256,6 @@ image/alpine/       guest provisioning script and OpenRC services
 docker/             the container's entrypoint, kivora command and guest checks
 Dockerfile          the image: QEMU, the VM's network, what the first start needs
 compose.yaml        the install: the container, its rights, its volumes
-scripts/vm/         scripts of the former libvirt install
-host/libvirt/       network filter of the former libvirt install
 ```
 
 ## The VM
@@ -462,15 +462,15 @@ reasoning:
 | Human control | input lock, takeover request |
 | Persistence and faults | login kept across a browser restart, credentials, Chromium crash, Internet loss |
 
-Run it on the server, with a key authorized with `authorize-key.sh` and the gateway
-tunnel open. `VM_IP` is the address `scripts/vm/check-host.sh` prints:
+Run it on the server, in this directory, with the server set up as a
+[laptop](#on-your-laptop) and the live view tunnel open:
 
 ```sh
-ssh -i $KEY -N -L 6080:127.0.0.1:6080 agent@$VM_IP &
+ssh -N kivoradesk &
 go build -o bin/kivora-scenarios ./cmd/kivora-scenarios
-bin/kivora-scenarios -mcp "ssh -i $KEY -T agent@$VM_IP /usr/local/bin/kivora-mcp" \
-  -token "$(scripts/vm/ssh.sh 'doas -u kivora-web /usr/local/bin/kivora-web session')" \
-  -scripts "$PWD/scripts/vm" -runs 10
+bin/kivora-scenarios -mcp "ssh -o ClearAllForwardings=yes -T kivoradesk /usr/local/bin/kivora-mcp" \
+  -token "$(docker compose exec -T kivoradesk kivora ssh 'doas -u kivora-web /usr/local/bin/kivora-web session')" \
+  -admin "docker compose exec -T kivoradesk kivora" -runs 10
 ```
 
 Result on 2026-11-01 (Alpine 3.24, Chromium 155, 2 vCPU, 4 GiB): **300/300
@@ -495,23 +495,22 @@ bin/kivora-bench -compare before.json after.json
 
 Unit tests run anywhere: `go test ./...`.
 
-Integration tests run against the VM, with the gateway tunnel open
-(`ssh -N -L 6080:127.0.0.1:6080 agent@$VM_IP` from the server, using
-a key authorized with `authorize-key.sh`):
+Integration tests run against the VM, on the server, with the server set up as a
+[laptop](#on-your-laptop) and the live view tunnel open (`ssh -N kivoradesk`):
 
 ```sh
-KEY=~/.local/share/kivoradesk/ssh/id_ed25519
+KIVORA=(docker compose exec -T kivoradesk kivora)
 KIVORA_WEB_URL=http://localhost:6080 \
-KIVORA_WEB_TOKEN=$(scripts/vm/ssh.sh 'doas -u kivora-web /usr/local/bin/kivora-web session') \
-KIVORA_XDOTOOL="$PWD/scripts/vm/ssh.sh doas -u agent env DISPLAY=:1 xdotool" \
-KIVORA_MCP_COMMAND="ssh -i $KEY -T agent@$VM_IP /usr/local/bin/kivora-mcp" \
+KIVORA_WEB_TOKEN=$("${KIVORA[@]}" ssh 'doas -u kivora-web /usr/local/bin/kivora-web session') \
+KIVORA_XDOTOOL="${KIVORA[*]} ssh doas -u agent env DISPLAY=:1 xdotool" \
+KIVORA_MCP_COMMAND="ssh -o ClearAllForwardings=yes -T kivoradesk /usr/local/bin/kivora-mcp" \
 go test -tags integration -p 1 ./cmd/...   # one at a time: they share the VM
 ```
 
 The MCP tests drive the real server over SSH: browsing, forms, accented
 typing, PDF and download, shell and files, the input lock and the takeover
 request. `KIVORA_TYPE_RUNS=100` sets the number of accented typing runs.
-`KIVORA_HOST_SCRIPTS=1` adds the tests that use the server's admin scripts:
+`KIVORA_ADMIN="${KIVORA[*]}"` adds the tests that use the server's admin commands:
 fault injection (Chromium is killed, the VM loses its Internet route, and the
 tools must recover or fail explicitly) and a credential that must never
 reach the model.
@@ -520,8 +519,8 @@ reach the model.
 
 ```sh
 CGO_ENABLED=0 go build -o bin/kivora-probe ./cmd/kivora-probe
-scripts/vm/ssh.sh 'cat > /tmp/kivora-probe && chmod 755 /tmp/kivora-probe' < bin/kivora-probe
-scripts/vm/ssh.sh 'doas -u agent env DISPLAY=:1 /tmp/kivora-probe -n 1000'
+docker compose exec -T kivoradesk kivora ssh 'cat > /tmp/kivora-probe && chmod 755 /tmp/kivora-probe' < bin/kivora-probe
+docker compose exec -T kivoradesk kivora ssh 'doas -u agent env DISPLAY=:1 /tmp/kivora-probe -n 1000'
 ```
 
 Run `kivora-probe -h` for options (`-seed` for reproducible runs, `-json`).

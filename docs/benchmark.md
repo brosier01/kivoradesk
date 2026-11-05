@@ -107,7 +107,7 @@ On the server, with the VM created and provisioned:
 ```sh
 go build -o bin/kivora-bench ./cmd/kivora-bench
 bin/kivora-bench -label before -out before.json
-# apply a change, scripts/vm/provision.sh
+# apply a change, docker compose up -d --build --wait
 bin/kivora-bench -label after -out after.json
 bin/kivora-bench -compare before.json after.json
 ```

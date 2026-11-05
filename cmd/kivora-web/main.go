@@ -3,7 +3,7 @@
 //
 // It listens on localhost inside the VM; the human reaches it through an SSH
 // tunnel. Every request must carry a session, set as a cookie by the one-time
-// URL printed by scripts/vm/web-url.sh. Viewer input is relayed to the VNC
+// URL printed by "kivora web-url". Viewer input is relayed to the VNC
 // server only while the human owns the desktop.
 //
 // Run as its account, it also manages sign-in, without the gateway restarting:
@@ -266,7 +266,7 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 	}
 	if !s.sessions.redeem(r.URL.Query().Get("code")) {
 		w.WriteHeader(http.StatusUnauthorized)
-		io.WriteString(w, "This sign-in link is invalid, expired or already used. Get a new one with scripts/vm/web-url.sh.\n")
+		io.WriteString(w, "This sign-in link is invalid, expired or already used. Get a new one on the server with: kivora web-url.\n")
 		return
 	}
 	session, err := s.sessions.issue(sessionsDir)
@@ -289,7 +289,7 @@ func (s *server) page(static fs.FS) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !s.authorized(r) {
 			w.WriteHeader(http.StatusUnauthorized)
-			io.WriteString(w, "Open the URL printed by scripts/vm/web-url.sh to sign in.\n")
+			io.WriteString(w, "Open the URL printed on the server by kivora web-url to sign in.\n")
 			return
 		}
 		http.ServeFileFS(w, r, static, "index.html")
