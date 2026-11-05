@@ -11,14 +11,13 @@ command=/usr/local/bin/kivora-proxy
 command_args="-listen 127.0.0.1:$KIVORA_PROXY_PORT"
 command_user="kivora-proxy:kivora-proxy"
 respawn_delay=2
-# Restart after crashes, giving up only on a crash loop (5 within a minute).
-respawn_max=5
-respawn_period=60
+# Never give up: what stopped it may be gone a moment later.
+respawn_max=0
 output_log=/var/log/kivora-proxy.log
 error_log=/var/log/kivora-proxy.log
 
 depend() {
-	need net kivora-firewall
+	need net kivora-firewall kivora-data
 }
 
 start_pre() {

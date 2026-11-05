@@ -11,12 +11,12 @@ depend() {
 
 start() {
 	ebegin "Loading KivoraDesk firewall rules"
+	# One transaction: the old rules hold until the new ones replace them.
 	nft -f /etc/kivoradesk/firewall.nft
 	eend $?
 }
 
 stop() {
-	ebegin "Removing KivoraDesk firewall rules"
-	nft delete table inet kivoradesk 2>/dev/null
+	ebegin "Keeping the KivoraDesk firewall rules until the next boot"
 	eend 0
 }

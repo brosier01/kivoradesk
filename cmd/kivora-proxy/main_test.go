@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -12,7 +13,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestAllowed(t *testing.T) {
@@ -147,4 +150,85 @@ func TestANameResolvingHereIsRefused(t *testing.T) {
 	if resp, _, _ := connect(t, srv.Listener.Addr().String(), "localhost:443"); resp.StatusCode != 502 {
 		t.Fatalf("status = %s", resp.Status)
 	}
+}
+
+func TestTunnelsAreLimited(t *testing.T) {
+	addr := start(t, "allowed.example\n")
+	for i := range maxTunnels {
+		if resp, _, _ := connect(t, addr, "allowed.example:443"); resp.StatusCode != 200 {
+			t.Fatalf("tunnel %d: %s", i, resp.Status)
+		}
+	}
+	if resp, _, _ := connect(t, addr, "allowed.example:443"); resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("one tunnel too many: %s", resp.Status)
+	}
+}
+
+// The worker chooses what it asks for, and the log is on the system disk.
+func TestRefusalsTakeLittleRoomInTheLog(t *testing.T) {
+	var logged bytes.Buffer
+	var mu sync.Mutex
+	path := filepath.Join(t.TempDir(), "allowlist")
+	os.WriteFile(path, nil, 0o644)
+	p := newProxy(path, slog.New(slog.NewTextHandler(lockedWriter{&mu, &logged}, nil)))
+	srv := httptest.NewUnstartedServer(p)
+	srv.Config = newServer("", p)
+	srv.Start()
+	defer srv.Close()
+	addr := srv.Listener.Addr().String()
+
+	huge := strings.Repeat("a", 1<<20)
+	c, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	go fmt.Fprintf(c, "CONNECT %s:443 HTTP/1.1\r\nHost: %s:443\r\n\r\n", huge, huge)
+	resp, err := http.ReadResponse(bufio.NewReader(c), nil)
+	if err != nil || resp.StatusCode != http.StatusRequestHeaderFieldsTooLarge {
+		t.Fatalf("a huge request: %v, %v", resp, err)
+	}
+
+	long := strings.Repeat("b", 2000) + ".example:443"
+	if resp, _, _ := connect(t, addr, long); resp.StatusCode != 403 {
+		t.Fatalf("a long name: %s", resp.Status)
+	}
+	for range 100 {
+		connect(t, addr, "other.example:443")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if lines := strings.Count(logged.String(), "\n"); lines > 5 {
+		t.Errorf("%d lines for one second of requests:\n%s", lines, logged.String())
+	}
+	if logged.Len() > 2000 {
+		t.Errorf("%d bytes logged", logged.Len())
+	}
+}
+
+func TestLogLimitCountsWhatItDrops(t *testing.T) {
+	var l logLimit
+	now := time.Now()
+	if ok, n := l.allow(now); !ok || n != 0 {
+		t.Fatalf("first line: %v, %d", ok, n)
+	}
+	for range 3 {
+		if ok, _ := l.allow(now.Add(time.Millisecond)); ok {
+			t.Fatal("a line within the second was allowed")
+		}
+	}
+	if ok, n := l.allow(now.Add(2 * time.Second)); !ok || n != 3 {
+		t.Fatalf("next line: %v, %d", ok, n)
+	}
+}
+
+type lockedWriter struct {
+	mu *sync.Mutex
+	w  io.Writer
+}
+
+func (l lockedWriter) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.w.Write(p)
 }
