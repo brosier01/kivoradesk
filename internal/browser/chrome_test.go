@@ -187,6 +187,9 @@ func TestDialogIsReportedAtOnce(t *testing.T) {
 	b := &Browser{Endpoint: endpoint}
 	defer b.reset()
 	ctx := testContext(t, time.Minute)
+	if _, err := b.Navigate(ctx, "http://127.0.0.1:"+port+"/ok"); err != nil { // a new profile starts slowly
+		t.Fatal(err)
+	}
 	start := time.Now()
 	_, err := b.Navigate(ctx, "http://127.0.0.1:"+port+"/dialog")
 	var site *ThirdPartyError
@@ -227,10 +230,16 @@ func (b *Browser) withActiveRaw(ctx context.Context, fn func(*cdp.Page) error) e
 
 func TestLoopingPageIsReportedInSeconds(t *testing.T) {
 	endpoint := startChrome(t)
-	port := site(t, map[string]string{"/busy": `<title>busy</title><script>setTimeout(() => { for (;;); }, 0)</script>busy`})
+	port := site(t, map[string]string{
+		"/busy": `<title>busy</title><script>setTimeout(() => { for (;;); }, 0)</script>busy`,
+		"/ok":   `<title>ok</title>ok`,
+	})
 	b := &Browser{Endpoint: endpoint}
 	defer b.reset()
 	ctx := testContext(t, time.Minute)
+	if _, err := b.Navigate(ctx, "http://127.0.0.1:"+port+"/ok"); err != nil { // a new profile starts slowly
+		t.Fatal(err)
+	}
 	start := time.Now()
 	_, err := b.Navigate(ctx, "http://127.0.0.1:"+port+"/busy")
 	if !errors.Is(err, ErrTabStuck) {
