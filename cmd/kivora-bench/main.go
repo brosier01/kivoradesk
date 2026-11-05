@@ -1,9 +1,9 @@
 // Command kivora-bench measures the resources and speed of a KivoraDesk VM:
 // boot time, disk, memory and CPU at idle, memory with real sites open, and
-// the latency of the MCP tools. It runs on the server, next to the admin
-// scripts, and drives the MCP server over SSH like a laptop.
+// the latency of the MCP tools. It runs on the server, in the project's directory,
+// and drives the MCP server over SSH like a laptop.
 //
-//	kivora-bench -scripts scripts/vm -label baseline -out baseline.json
+//	kivora-bench -label baseline -out baseline.json
 //	kivora-bench -compare baseline.json candidate.json
 //
 // Compare two runs to judge a change (A/B): run the benchmark, apply the
@@ -69,12 +69,12 @@ type latency struct {
 }
 
 type benchFlags struct {
-	scripts string
-	mcpCmd  string
-	runs    int
-	settle  time.Duration
-	reboot  bool
-	sites   []string
+	adminCmd string
+	mcpCmd   string
+	runs     int
+	settle   time.Duration
+	reboot   bool
+	sites    []string
 }
 
 func main() {
@@ -83,8 +83,8 @@ func main() {
 	out := flag.String("out", "", "write the report as JSON to this file")
 	compare := flag.Bool("compare", false, "compare two JSON reports given as arguments")
 	sites := flag.String("sites", "https://en.wikipedia.org/wiki/Linux,https://github.com/torvalds/linux,https://www.bbc.com/news", "comma-separated sites opened for the loaded measurement")
-	flag.StringVar(&f.scripts, "scripts", "scripts/vm", "directory of the server's admin scripts")
-	flag.StringVar(&f.mcpCmd, "mcp", "", "command starting the MCP server (default: ssh to the agent account)")
+	flag.StringVar(&f.adminCmd, "admin", "docker compose exec -T kivoradesk kivora", "command that runs the server's admin commands")
+	flag.StringVar(&f.mcpCmd, "mcp", "ssh -o ClearAllForwardings=yes -T kivoradesk /usr/local/bin/kivora-mcp", "command starting the MCP server")
 	flag.IntVar(&f.runs, "runs", 20, "runs per latency measurement")
 	flag.DurationVar(&f.settle, "settle", time.Minute, "wait before measuring idle resources")
 	flag.BoolVar(&f.reboot, "reboot", true, "reboot the VM first and measure the boot")
@@ -99,16 +99,6 @@ func main() {
 		return
 	}
 	f.sites = strings.Split(*sites, ",")
-	if f.mcpCmd == "" {
-		dir := os.ExpandEnv("$HOME/.local/share/kivoradesk/ssh")
-		ip := os.Getenv("VM_IP")
-		if ip == "" {
-			ip = "192.168.122.50"
-		}
-		// Like scripts/vm: the host key is kept once seen.
-		f.mcpCmd = "ssh -i " + dir + "/id_ed25519 -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=" + dir + "/known_hosts" +
-			" -o LogLevel=ERROR -T agent@" + ip + " /usr/local/bin/kivora-mcp"
-	}
 
 	r := &report{Label: *label, Date: time.Now().UTC().Format(time.RFC3339), Sites: f.sites, settings: f}
 	if err := r.run(); err != nil {
@@ -164,15 +154,12 @@ func (r *report) run() error {
 	return nil
 }
 
-// measureBoot reboots the VM through the guest agent and times each stage.
+// measureBoot reboots the VM and times each stage.
 func measureBoot(f benchFlags) (*boot, error) {
 	progress("rebooting the VM")
 	before := uptime(f)
 	start := time.Now()
-	reboot := exec.Command("bash", "-c", `source "$1/common.sh" && virsh_ reboot "$VM_NAME" --mode agent >/dev/null`, "_", f.scripts)
-	if out, err := reboot.CombinedOutput(); err != nil {
-		return nil, fmt.Errorf("reboot: %v: %s", err, out)
-	}
+	admin(f, "", "doas reboot") // the connection may end first: the uptime below tells
 	b := &boot{}
 	deadline := start.Add(3 * time.Minute)
 	for {
@@ -186,7 +173,7 @@ func measureBoot(f benchFlags) (*boot, error) {
 		time.Sleep(500 * time.Millisecond)
 	}
 	for {
-		out, err := admin(f, "", `curl -fsS -o /dev/null http://127.0.0.1:9222/json/version && cut -d' ' -f1 /proc/uptime`)
+		out, err := admin(f, "", `doas -u agent curl -fsS -o /dev/null http://127.0.0.1:9222/json/version && cut -d' ' -f1 /proc/uptime`)
 		if err == nil {
 			b.BrowserUptime, _ = strconv.ParseFloat(strings.TrimSpace(out), 64)
 			break
@@ -376,7 +363,8 @@ func measureLoaded(c *client, f benchFlags) (memory, error) {
 
 // admin runs a shell command on the VM as the admin account.
 func admin(f benchFlags, stdin, command string) (string, error) {
-	cmd := exec.Command(f.scripts+"/ssh.sh", command)
+	argv := append(strings.Fields(f.adminCmd), "ssh", command)
+	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Stdin = strings.NewReader(stdin)
 	out, err := cmd.Output()
 	return strings.TrimSpace(string(out)), err

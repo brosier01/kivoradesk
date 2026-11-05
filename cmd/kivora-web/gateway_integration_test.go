@@ -4,7 +4,7 @@
 //
 //	KIVORA_WEB_URL=http://localhost:6080 \
 //	KIVORA_WEB_TOKEN=$(...) \
-//	KIVORA_XDOTOOL="scripts/vm/ssh.sh doas -u agent env DISPLAY=:1 xdotool" \
+//	KIVORA_XDOTOOL="docker compose exec -T kivoradesk kivora ssh doas -u agent env DISPLAY=:1 xdotool" \
 //	go test -tags integration ./cmd/kivora-web
 package main
 

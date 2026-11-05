@@ -512,7 +512,7 @@ var scenarios = []scenario{
 		if err := contains(before, v); err != nil {
 			return fmt.Errorf("cookie not set before the restart: %w", err)
 		}
-		if _, err := r.script("", "ssh.sh", "doas rc-service -q kivora-browser restart"); err != nil {
+		if _, err := r.admin("", "ssh", "doas rc-service -q kivora-browser restart"); err != nil {
 			return err
 		}
 		if _, err := r.navigate("https://httpbin.org/cookies"); err != nil {
@@ -526,10 +526,10 @@ var scenarios = []scenario{
 	}},
 	{name: "secret_fill", host: true, run: func(r *runner) error {
 		value := "sc-" + unique() + "@example.com"
-		if _, err := r.script(value, "secret.sh", "set", "--field", "text", "scenario-secret", "https://httpbin.org"); err != nil {
+		if _, err := r.admin(value, "secret", "set", "--field", "text", "scenario-secret", "https://httpbin.org"); err != nil {
 			return err
 		}
-		defer r.script("", "secret.sh", "delete", "scenario-secret")
+		defer r.admin("", "secret", "delete", "scenario-secret")
 		if _, err := r.navigate("https://httpbin.org/forms/post"); err != nil {
 			return err
 		}
@@ -569,7 +569,7 @@ var scenarios = []scenario{
 		return contains(echo, "[secret scenario-secret hidden]")
 	}},
 	{name: "chromium_crash", host: true, run: func(r *runner) error {
-		if _, err := r.script("", "ssh.sh", "doas pkill -KILL -f '[/]usr/lib/chromium/chromium'"); err != nil {
+		if _, err := r.admin("", "ssh", "doas pkill -KILL -f '[/]usr/lib/chromium/chromium'"); err != nil {
 			return err
 		}
 		out, err := r.navigate("https://example.com")
@@ -579,10 +579,9 @@ var scenarios = []scenario{
 		return contains(out, "example.com")
 	}},
 	{name: "internet_loss", host: true, run: func(r *runner) error {
-		// A temporary firewall table rejects everything leaving the libvirt
-		// network: the Internet is gone, the server's SSH link stays up, and
-		// no DHCP renewal can undo it.
-		if _, err := r.script("", "ssh.sh", cutInternet); err != nil {
+		// A temporary firewall table rejects everything leaving the VM: the
+		// Internet is gone, and the server's SSH link stays up.
+		if _, err := r.admin("", "ssh", cutInternet); err != nil {
 			return err
 		}
 		restored := false
@@ -591,7 +590,7 @@ var scenarios = []scenario{
 				return nil
 			}
 			restored = true
-			_, err := r.script("", "ssh.sh", restoreInternet)
+			_, err := r.admin("", "ssh", restoreInternet)
 			return err
 		}
 		defer restore()
