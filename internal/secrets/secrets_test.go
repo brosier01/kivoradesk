@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestNormalizeOrigin(t *testing.T) {
@@ -157,6 +158,43 @@ func TestOlderEntriesDefaultToPasswordFields(t *testing.T) {
 	g, err := (&Store{Path: path}).ValueFor("old", "https://a.example/")
 	if err != nil || g.Field != FieldPassword {
 		t.Fatalf("ValueFor = %+v, %v", g, err)
+	}
+}
+
+func TestClientScrubIsOneCallAndFailsClosed(t *testing.T) {
+	calls := filepath.Join(t.TempDir(), "calls")
+	c := &Client{Prefix: []string{"sh", "-c", `echo call >>"$0"; tr a b`, calls}}
+	got, err := c.Scrub(context.Background(), []string{"a1", "", "a\x00a"})
+	if err != nil || len(got) != 3 || got[0] != "b1" || got[1] != "" || got[2] != "b\uFFFDb" {
+		t.Fatalf("Scrub = %q, %v", got, err)
+	}
+	if data, _ := os.ReadFile(calls); strings.Count(string(data), "call") != 1 {
+		t.Fatalf("calls to the helper: %q", data)
+	}
+	for _, script := range []string{`exit 1`, `echo broken >&2; exit 1`, `printf 'one\0two\0three\0four'`} {
+		c := &Client{Prefix: []string{"sh", "-c", script, "_"}}
+		if got, err := c.Scrub(context.Background(), []string{"a", "b", "c"}); err == nil {
+			t.Errorf("%s: Scrub = %q, want an error", script, got)
+		}
+	}
+	over := make([]string, 1)
+	over[0] = strings.Repeat("x", MaxScrub+1)
+	if _, err := (&Client{Prefix: []string{"cat"}}).Scrub(context.Background(), over); err == nil {
+		t.Error("a text over the limit went to the helper")
+	}
+}
+
+// A helper this account cannot kill does not hold the call.
+func TestClientDoesNotWaitForAStuckHelper(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	c := &Client{Prefix: []string{"sh", "-c", `sleep 3`, "_"}}
+	start := time.Now()
+	if _, err := c.Scrub(ctx, []string{"a"}); err == nil || !strings.Contains(err.Error(), "does not answer") {
+		t.Fatalf("Scrub = %v", err)
+	}
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("the call took %v", d)
 	}
 }
 

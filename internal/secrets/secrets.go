@@ -270,6 +270,19 @@ func (s *Store) List() ([]Info, error) {
 	return infos, nil
 }
 
+// Cleaner returns a Cleaner for every stored value.
+func (s *Store) Cleaner() (*Cleaner, error) {
+	m, err := s.load()
+	if err != nil {
+		return nil, err
+	}
+	values := make([]string, 0, len(m))
+	for _, sec := range m {
+		values = append(values, sec.Value)
+	}
+	return NewCleaner(values), nil
+}
+
 // ValueFor returns a grant for a secret if pageURL is on one of its origins.
 func (s *Store) ValueFor(name, pageURL string) (Grant, error) {
 	m, err := s.load()
