@@ -7,10 +7,12 @@
 // the success rate per scenario and overall.
 //
 //	kivora-scenarios -mcp "ssh -T kivoradesk /usr/local/bin/kivora-mcp" \
-//	  -web http://localhost:6080 -token TOKEN -scripts scripts/vm -runs 3
+//	  -web http://localhost:6080 -token TOKEN \
+//	  -admin "docker compose exec -T kivoradesk kivora" -runs 3
 //
-// -scripts enables the scenarios that need the server's admin scripts
-// (secrets, browser restart, fault injection); run it on the server.
+// -admin enables the scenarios that need the server's admin commands (secrets,
+// browser restart, fault injection); run it on the server, in the project's
+// directory.
 package main
 
 import (
@@ -31,16 +33,16 @@ import (
 
 type scenario struct {
 	name string
-	host bool // needs the server's admin scripts
+	host bool // needs the server's admin commands
 	run  func(r *runner) error
 }
 
 type runner struct {
-	ctx     context.Context
-	cs      *mcp.ClientSession
-	web     string
-	token   string
-	scripts string
+	ctx      context.Context
+	cs       *mcp.ClientSession
+	web      string
+	token    string
+	adminCmd []string
 }
 
 type result struct {
@@ -56,13 +58,13 @@ func main() {
 	mcpCmd := flag.String("mcp", "", "command starting the MCP server (over SSH)")
 	web := flag.String("web", "http://localhost:6080", "web gateway URL (through the tunnel)")
 	token := flag.String("token", os.Getenv("KIVORA_WEB_TOKEN"), "web gateway session (kivora-web session)")
-	scripts := flag.String("scripts", "", "directory of the server's admin scripts (enables host scenarios)")
+	admin := flag.String("admin", "", "command that runs the server's admin commands (enables host scenarios)")
 	runs := flag.Int("runs", 3, "runs per scenario")
 	only := flag.String("only", "", "run scenarios whose name matches this regexp")
 	jsonOut := flag.Bool("json", false, "print results as JSON")
 	flag.Parse()
 	if *mcpCmd == "" || *token == "" {
-		fmt.Fprintln(os.Stderr, "usage: kivora-scenarios -mcp COMMAND -token TOKEN [-web URL] [-scripts DIR] [-runs N]")
+		fmt.Fprintln(os.Stderr, "usage: kivora-scenarios -mcp COMMAND -token TOKEN [-web URL] [-admin COMMAND] [-runs N]")
 		os.Exit(2)
 	}
 
@@ -75,7 +77,7 @@ func main() {
 		os.Exit(1)
 	}
 	defer cs.Close()
-	r := &runner{ctx: ctx, cs: cs, web: *web, token: *token, scripts: *scripts}
+	r := &runner{ctx: ctx, cs: cs, web: *web, token: *token, adminCmd: strings.Fields(*admin)}
 
 	var filter *regexp.Regexp
 	if *only != "" {
@@ -84,7 +86,7 @@ func main() {
 	var results []result
 	total, passed := 0, 0
 	for _, sc := range scenarios {
-		if (sc.host && r.scripts == "") || (filter != nil && !filter.MatchString(sc.name)) {
+		if (sc.host && len(r.adminCmd) == 0) || (filter != nil && !filter.MatchString(sc.name)) {
 			continue
 		}
 		res := result{Name: sc.name}
@@ -220,13 +222,14 @@ func (r *runner) setOwner(owner string) error {
 	return nil
 }
 
-// script runs one of the server's admin scripts.
-func (r *runner) script(stdin, name string, args ...string) (string, error) {
-	cmd := exec.CommandContext(r.ctx, r.scripts+"/"+name, args...)
+// admin runs one of the server's admin commands.
+func (r *runner) admin(stdin string, args ...string) (string, error) {
+	argv := append(append([]string(nil), r.adminCmd...), args...)
+	cmd := exec.CommandContext(r.ctx, argv[0], argv[1:]...)
 	cmd.Stdin = strings.NewReader(stdin)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return string(out), fmt.Errorf("%s %v: %v: %s", name, args, err, oneLine(string(out)))
+		return string(out), fmt.Errorf("%v: %v: %s", args, err, oneLine(string(out)))
 	}
 	return string(out), nil
 }

@@ -1,10 +1,11 @@
 //go:build integration
 
-// Tests that need the server's admin scripts (scripts/vm): fault injection
-// (Chromium is killed, the VM loses Internet) and secrets.
-// They run only with KIVORA_HOST_SCRIPTS=1, on the server that hosts the VM:
+// Tests that need the server's admin commands: fault injection (Chromium is
+// killed, the VM loses Internet) and secrets. They run only with KIVORA_ADMIN, on
+// the server that hosts the VM:
 //
-//	KIVORA_HOST_SCRIPTS=1 KIVORA_MCP_COMMAND=... KIVORA_WEB_URL=... KIVORA_WEB_TOKEN=... \
+//	KIVORA_ADMIN="docker compose exec -T kivoradesk kivora" \
+//	KIVORA_MCP_COMMAND=... KIVORA_WEB_URL=... KIVORA_WEB_TOKEN=... \
 //	go test -tags integration -run 'Fault|Secret' ./cmd/kivora-mcp
 package main
 
@@ -22,8 +23,8 @@ import (
 )
 
 func setupHost(t *testing.T) *e2e {
-	if os.Getenv("KIVORA_HOST_SCRIPTS") != "1" {
-		t.Skip("set KIVORA_HOST_SCRIPTS=1 to run tests that use the server's admin scripts")
+	if os.Getenv("KIVORA_ADMIN") == "" {
+		t.Skip("set KIVORA_ADMIN to run tests that use the server's admin commands")
 	}
 	return setupE2E(t)
 }
@@ -31,17 +32,23 @@ func setupHost(t *testing.T) *e2e {
 // admin runs a command in the VM as the admin account.
 func admin(t *testing.T, command string) string {
 	t.Helper()
-	return script(t, "", "ssh.sh", command)
+	return kivora(t, "", "ssh", command)
 }
 
-// script runs scripts/vm/NAME with stdin.
-func script(t *testing.T, stdin, name string, args ...string) string {
+// kivoraCommand prepares an admin command of the server.
+func kivoraCommand(args ...string) *exec.Cmd {
+	argv := append(strings.Fields(os.Getenv("KIVORA_ADMIN")), args...)
+	return exec.Command(argv[0], argv[1:]...)
+}
+
+// kivora runs an admin command of the server with stdin.
+func kivora(t *testing.T, stdin string, args ...string) string {
 	t.Helper()
-	cmd := exec.Command("../../scripts/vm/"+name, args...)
+	cmd := kivoraCommand(args...)
 	cmd.Stdin = strings.NewReader(stdin)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("%s %v: %v: %s", name, args, err, out)
+		t.Fatalf("%v: %v: %s", args, err, out)
 	}
 	return string(out)
 }
@@ -60,12 +67,12 @@ func TestFaultChromiumCrash(t *testing.T) {
 	e.mustContain(page, "Example Domain")
 }
 
-// TestFaultNetworkLoss rejects everything leaving the libvirt network with
+// TestFaultNetworkLoss rejects everything leaving the VM with
 // a temporary firewall table (loopback excepted): the Internet is gone while the server's SSH
 // link to the VM (and so the MCP session) stays up.
 func TestFaultNetworkLoss(t *testing.T) {
 	e := setupHost(t)
-	restore := func() { exec.Command("../../scripts/vm/ssh.sh", "doas nft delete table inet kivoradesk_fault").Run() }
+	restore := func() { kivoraCommand("ssh", "doas nft delete table inet kivoradesk_fault").Run() }
 	admin(t, `doas nft -f - <<'EOF'
 table inet kivoradesk_fault {
 	chain output {
@@ -110,8 +117,8 @@ func firstLine(s string) string {
 func TestSecretNeverReachesTheModel(t *testing.T) {
 	e := setupHost(t)
 	value := fmt.Sprintf("kv-%d-s3cr3t@example.com", time.Now().UnixNano())
-	script(t, value, "secret.sh", "set", "--field", "text", "e2e-secret", "https://httpbin.org")
-	t.Cleanup(func() { script(t, "", "secret.sh", "delete", "e2e-secret") })
+	kivora(t, value, "secret", "set", "--field", "text", "e2e-secret", "https://httpbin.org")
+	t.Cleanup(func() { kivora(t, "", "secret", "delete", "e2e-secret") })
 
 	leaks := func(out string) {
 		t.Helper()
@@ -125,8 +132,8 @@ func TestSecretNeverReachesTheModel(t *testing.T) {
 	leaks(out)
 
 	// A credential bound to another site is refused here.
-	script(t, value, "secret.sh", "set", "e2e-other", "https://example.com")
-	t.Cleanup(func() { script(t, "", "secret.sh", "delete", "e2e-other") })
+	kivora(t, value, "secret", "set", "e2e-other", "https://example.com")
+	t.Cleanup(func() { kivora(t, "", "secret", "delete", "e2e-other") })
 	e.call("browser_navigate", map[string]any{"url": "https://httpbin.org/forms/post"}, false)
 	page, _ := e.call("browser_read_page", nil, false)
 	field := element(t, page, `"custemail"`)
@@ -135,8 +142,8 @@ func TestSecretNeverReachesTheModel(t *testing.T) {
 	leaks(out)
 
 	// A password credential only goes into a password field.
-	script(t, value, "secret.sh", "set", "e2e-password", "https://httpbin.org")
-	t.Cleanup(func() { script(t, "", "secret.sh", "delete", "e2e-password") })
+	kivora(t, value, "secret", "set", "e2e-password", "https://httpbin.org")
+	t.Cleanup(func() { kivora(t, "", "secret", "delete", "e2e-password") })
 	out, _ = e.call("secrets_fill", map[string]any{"name": "e2e-password", "element": field}, true)
 	e.mustContain(out, "not a password field")
 	leaks(out)
@@ -335,8 +342,8 @@ func TestShellReachesOnlyAllowedSites(t *testing.T) {
 		t.Error("the proxy lets plain HTTP through")
 	}
 
-	script(t, "", "shell-allow.sh", "add", "example.com")
-	t.Cleanup(func() { script(t, "", "shell-allow.sh", "remove", "example.com") })
+	kivora(t, "", "shell-allow", "add", "example.com")
+	t.Cleanup(func() { kivora(t, "", "shell-allow", "remove", "example.com") })
 	if status("curl -fsS -m 15 https://example.com") != "0" {
 		t.Error("an allowed site is not reachable")
 	}
@@ -352,7 +359,7 @@ func TestShellReachesOnlyAllowedSites(t *testing.T) {
 // permanent token left on the VM.
 func TestSignInLink(t *testing.T) {
 	e := setupHost(t)
-	link := strings.TrimSpace(script(t, "", "web-url.sh"))
+	link := strings.TrimSpace(kivora(t, "", "web-url"))
 	code, ok := strings.CutPrefix(link, "http://kivora.localhost:6080/login?code=")
 	if !ok || len(code) != 64 {
 		t.Fatalf("web-url.sh printed %q", link)

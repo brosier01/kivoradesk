@@ -2,7 +2,7 @@
 // the agent's shell commands: the local firewall rejects everything else, DNS
 // included. It opens HTTPS tunnels to the sites the human allowed and to nothing
 // else, so that a command misled by a web page cannot send the workspace anywhere.
-// The list is read at each request: scripts/vm/shell-allow.sh changes it at once.
+// The list is read at each request: "kivora shell-allow" changes it at once.
 //
 // A list entry is a host name, or *.example.com for its subdomains, with an
 // optional port (443 by default). Tunnels are opaque: this checks where they go,

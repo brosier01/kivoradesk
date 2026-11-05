@@ -8,7 +8,7 @@
 //	kivora-vault delete NAME
 //
 // The desktop account may only run list and value (see the doas rules). The
-// human runs the others from the server, with scripts/vm/secret.sh.
+// human runs the others from the server, with "kivora secret".
 package main
 
 import (

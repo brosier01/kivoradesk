@@ -1,6 +1,6 @@
 #!/sbin/openrc-run
 # The only way out of the VM for the agent's shell commands, to the sites the
-# human allowed (scripts/vm/shell-allow.sh).
+# human allowed (kivora shell-allow).
 
 description="KivoraDesk shell network proxy"
 
