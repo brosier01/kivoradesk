@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/brosier01/kivoradesk/internal/audit"
+	"github.com/brosier01/kivoradesk/internal/browser"
+	"github.com/brosier01/kivoradesk/internal/secrets"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -161,5 +163,55 @@ func TestBoundedAnswersWhenAToolDoesNotStop(t *testing.T) {
 	}
 	if d := time.Since(start); d > stopGrace+2*time.Second {
 		t.Fatalf("took %v", d)
+	}
+}
+
+// MCP-01: a site echoes a stored value, and the model chooses where the page text
+// or the file is cut. Cut before cleaning, the value is no longer recognized and
+// goes out a character at a time; cut after, nothing of it does.
+func TestACutChosenByTheModelLeavesNothingOfAValue(t *testing.T) {
+	const value = "Hunter2-Secret!x"
+	s := &server{clean: cleanerOf(value)}
+	page := "Welcome back. You typed: " + value + " (keep it safe)"
+	for _, read := range []struct {
+		name string
+		cut  func(string, int) string
+	}{
+		{"browser_read_page", cutRunes},
+		{"files_read", cutText},
+	} {
+		for n := 1; n <= len(page)+1; n++ {
+			for _, whole := range []string{page, page + secrets.CutMark} {
+				got, _, err := s.cleanThenCut(context.Background(), whole, func(t string) string { return read.cut(t, n) })
+				if err != nil {
+					t.Fatal(err)
+				}
+				if strings.Contains(got, "Hu") || strings.Contains(got, secrets.CutMark) {
+					t.Fatalf("%s cut at %d: %q", read.name, n, got)
+				}
+			}
+		}
+	}
+	// What cannot be cleaned does not go out.
+	s.clean = func(context.Context, []string) ([]string, error) { return nil, errors.New("down") }
+	if got, _, err := s.cleanThenCut(context.Background(), page, func(t string) string { return t }); err == nil || got != "" {
+		t.Fatalf("without the vault: %q, %v", got, err)
+	}
+}
+
+// Cuts at a fixed length, such as that of an error of a site, end with a cut
+// mark: the cleaning hides the part of a value that is left before it.
+func TestFixedCutsAreMarked(t *testing.T) {
+	const value = "Hunter2-Secret!x"
+	clean := secrets.NewCleaner([]string{value})
+	detail := strings.Repeat("e", 40) + value + strings.Repeat("e", 40)
+	for n := len(secrets.CutMark); n < len(detail); n++ {
+		if got := clean.Clean(cutMarked(detail, n)); strings.Contains(got, "Hunt") || len(cutMarked(detail, n)) > n {
+			t.Fatalf("cut at %d: %q", n, got)
+		}
+	}
+	long := strings.Repeat("e", maxErrorDetail-8) + value
+	if got := clean.Clean(describe(&browser.ThirdPartyError{Message: "m", Detail: long})); strings.Contains(got, "Hunt") || !strings.Contains(got, secrets.CutMark) {
+		t.Fatalf("describe = %q", got)
 	}
 }

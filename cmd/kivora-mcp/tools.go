@@ -24,6 +24,8 @@ const (
 	maxWriteContent = 64 << 20
 	// maxElementsText bounds the list of elements of browser_read_page.
 	maxElementsText = 128 << 10
+	// maxFileRead is the most that files_read reads.
+	maxFileRead = 1000000
 )
 
 type none struct{}
@@ -312,14 +314,20 @@ func (s *server) registerBrowser(srv *mcp.Server) {
 			if maxChars <= 0 {
 				maxChars = 20000
 			}
-			limit := min(maxChars, 100000)
-			page, err := s.br.ReadPage(ctx, limit)
+			limit := min(maxChars, browser.MaxPageText)
+			// The whole text is read and cleaned, then cut: cut at a length the
+			// model chooses, a stored value would no longer be recognized.
+			page, err := s.br.ReadPage(ctx, browser.MaxPageText)
+			if err != nil {
+				return nil, err
+			}
+			pageText, truncated, err := s.cleanThenCut(ctx, page.Text, func(t string) string { return cutRunes(t, limit) })
 			if err != nil {
 				return nil, err
 			}
 			var b strings.Builder
-			fmt.Fprintf(&b, "# %s\n%s\n\n%s\n", page.Title, page.URL, page.Text)
-			if page.Truncated {
+			fmt.Fprintf(&b, "# %s\n%s\n\n%s\n", page.Title, page.URL, pageText)
+			if truncated || page.Truncated {
 				fmt.Fprintf(&b, "\n[text truncated at %d characters]\n", limit)
 			}
 			b.WriteString("\n## Interactive elements\n")
@@ -357,7 +365,11 @@ func (s *server) registerBrowser(srv *mcp.Server) {
 			if err != nil {
 				return nil, err
 			}
-			return text("Clicked element %d. %s%s", in.Element, switchedNote(tab), tabText(tab)), nil
+			unchecked := ""
+			if tab.Unchecked {
+				unchecked = "The page changed at once, before the click could be checked to have reached the element: take a screenshot to be sure. "
+			}
+			return text("Clicked element %d. %s%s%s", in.Element, unchecked, switchedNote(tab), tabText(tab)), nil
 		})
 
 	type btypeIn struct {
@@ -475,18 +487,26 @@ func (s *server) registerShellAndFiles(srv *mcp.Server) {
 	}
 	add(srv, s, observe, &mcp.Tool{Name: "files_read", Description: "Read a text file of /workspace."},
 		func(ctx context.Context, in readIn) ([]mcp.Content, error) {
-			maxBytes := clamp(in.MaxBytes, 100000, 1, 1000000)
-			data, truncated, err := s.work.ReadFile(ctx, in.Path, maxBytes)
+			maxBytes := clamp(in.MaxBytes, 100000, 1, maxFileRead)
+			// As for a page: read all there may be, clean it, then cut it.
+			data, cut, err := s.work.ReadFile(ctx, in.Path, maxFileRead)
 			if err != nil {
 				return nil, err
 			}
-			if truncated {
-				data = withoutCutCharacter(data)
+			whole := string(data)
+			if cut {
+				whole = string(withoutCutCharacter(data)) + secrets.CutMark
 			}
-			if !utf8.Valid(data) {
+			body, truncated, err := s.cleanThenCut(ctx, whole, func(t string) string {
+				return string(withoutCutCharacter([]byte(cutText(t, maxBytes))))
+			})
+			if err != nil {
+				return nil, err
+			}
+			truncated = truncated || cut
+			if !utf8.ValidString(body) {
 				return nil, fmt.Errorf("%s is not a text file; inspect it with shell_run (e.g. file, pdftotext) or copy it with scp", in.Path)
 			}
-			body := string(data)
 			if truncated {
 				body += fmt.Sprintf("\n[truncated at %d bytes]", maxBytes)
 			}
@@ -612,6 +632,17 @@ func switchedNote(tab browser.Tab) string {
 		return "That brought another tab or window on screen, where the next tools act. "
 	}
 	return ""
+}
+
+// cutRunes limits a text to n characters.
+func cutRunes(s string, n int) string {
+	for i := range s {
+		if n == 0 {
+			return s[:i]
+		}
+		n--
+	}
+	return s
 }
 
 // withoutCutCharacter drops an incomplete character at the end of data: a read

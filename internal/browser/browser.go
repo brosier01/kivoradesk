@@ -53,7 +53,11 @@ const (
 	maxTitle = 500
 	maxURL   = 2000
 	maxType  = 40
+	maxLabel = 120
 )
+
+// MaxPageText is the most text of a page that ReadPage is meant to read.
+const MaxPageText = 100000
 
 // ErrTabStuck says that the visible tab does not answer.
 var ErrTabStuck = errors.New("the browser tab does not respond, because the page is busy or shows a dialog: take a screenshot and use computer_key, or close it with browser_close_tab")
@@ -88,6 +92,9 @@ type Tab struct {
 	OpenedBy string `json:"opened_by,omitempty"` // the tab that opened this one: a popup, a target=_blank link
 	// Switched says that an action brought another tab or window on screen.
 	Switched bool `json:"-"`
+	// Unchecked says that a click led to another page so fast that it could not
+	// be checked to have reached its element.
+	Unchecked bool `json:"-"`
 }
 
 // Element is an interactive element found by ReadPage, addressed by ID.
@@ -300,16 +307,28 @@ func eval(ctx context.Context, p *cdp.Page, expr string, out any) error {
 	return onPage(ctx, p, tabProbeTimeout, func(ctx context.Context) error { return p.EvalIsolated(ctx, expr, out) })
 }
 
-// cut limits a text from a page, on a character boundary.
+// cut limits a text from a page to n bytes, on a character boundary. A cut text
+// ends with a cut mark, so that the cleaning of the results hides what may be
+// left of a stored value there.
 func cut(s string, n int) string {
 	if len(s) <= n {
 		return s
 	}
+	n -= len(secrets.CutMark)
 	for n > 0 && s[n]&0xC0 == 0x80 {
 		n--
 	}
-	return s[:n]
+	return s[:max(n, 0)] + secrets.CutMark
 }
+
+// cutJS is cut for the page scripts, in UTF-16 units, as JavaScript counts.
+var cutJS = fmt.Sprintf(`const cut = (s, n) => {
+    if (s.length <= n) return s;
+    let end = n - %[1]s.length;
+    const code = s.charCodeAt(end - 1);
+    if (code >= 0xD800 && code < 0xDC00) end--;
+    return s.slice(0, Math.max(end, 0)) + %[1]s;
+  };`, jsString(secrets.CutMark))
 
 // retry runs fn, reconnecting once if the connection was lost (Chromium
 // restarted, tab closed).
@@ -428,7 +447,7 @@ func (b *Browser) Current(ctx context.Context) (Tab, error) {
 	var tab Tab
 	err := b.withActive(ctx, func(_ *cdp.Conn, p *cdp.Page) error {
 		var v struct{ Title, URL string }
-		script := fmt.Sprintf(`({Title: document.title.slice(0, %d), URL: location.href.slice(0, %d)})`, maxTitle, maxURL)
+		script := fmt.Sprintf(`(() => { %s return {Title: cut(document.title, %d), URL: cut(location.href, %d)}; })()`, cutJS, maxTitle, maxURL)
 		if err := eval(ctx, p, script, &v); err != nil {
 			return err
 		}
@@ -484,10 +503,12 @@ func (b *Browser) CloseTab(ctx context.Context, id string) error {
 }
 
 // readPageJS numbers the visible interactive elements and returns the page
-// text. %d is the maximum text length. The numbers live in the isolated world:
-// the page can neither see them nor give them to other elements.
+// text. The first %d is the maximum text length. The numbers live in the isolated
+// world: the page can neither see them nor give them to other elements. What it
+// cuts ends with a cut mark.
 const readPageJS = `(() => {
-  const maxText = %d, maxTitle = %d, maxURL = %d, maxType = %d;
+  %s
+  const maxText = %d, maxTitle = %d, maxURL = %d, maxType = %d, maxLabel = %d;
   const kivora = globalThis.kivora ??= {
     elements: new Map(),
     secrets: new WeakSet(),
@@ -519,9 +540,9 @@ const readPageJS = `(() => {
     const hidden = el.type === "password" || kivora.secrets.has(el);
     const value = hidden ? "" : el.value;
     const label = (el.getAttribute("aria-label") || el.innerText || value || el.placeholder ||
-      el.title || el.alt || el.name || "").replace(/\s+/g, " ").trim().slice(0, 120);
-    elements.push({id, tag: el.tagName.toLowerCase(), type: (el.getAttribute("type") || el.getAttribute("role") || "").slice(0, maxType),
-      label, href: el.href && typeof el.href === "string" ? el.href.slice(0, maxURL) : ""});
+      el.title || el.alt || el.name || "").replace(/\s+/g, " ").trim();
+    elements.push({id, tag: el.tagName.toLowerCase(), type: cut(el.getAttribute("type") || el.getAttribute("role") || "", maxType),
+      label: cut(label, maxLabel), href: el.href && typeof el.href === "string" ? cut(el.href, maxURL) : ""});
   }
   let shadow_roots = 0, seen = 0;
   for (const el of document.querySelectorAll("*")) {
@@ -530,15 +551,18 @@ const readPageJS = `(() => {
   }
   let text = (document.body ? document.body.innerText : "").replace(/[ \t]+/g, " ").replace(/\n\s*\n\s*\n+/g, "\n\n").trim();
   const truncated = text.length > maxText;
-  if (truncated) text = text.slice(0, maxText);
-  return {title: document.title.slice(0, maxTitle), url: location.href.slice(0, maxURL), text, truncated, elements,
+  text = cut(text, maxText);
+  return {title: cut(document.title, maxTitle), url: cut(location.href, maxURL), text, truncated, elements,
     more_elements: more, frames: document.querySelectorAll("iframe, frame").length, shadow_roots};
 })()`
 
-// ReadPage returns the active tab's text and numbered interactive elements.
+// ReadPage returns the active tab's text and numbered interactive elements. A text
+// longer than maxChars is cut and ends with a cut mark. A value that the cut
+// leaves shorter than the cleaning recognizes would go out: a caller that lets
+// the model choose the length reads MaxPageText, and cuts after cleaning.
 func (b *Browser) ReadPage(ctx context.Context, maxChars int) (Page, error) {
 	var page Page
-	script := fmt.Sprintf(readPageJS, maxChars, maxTitle, maxURL, maxType)
+	script := fmt.Sprintf(readPageJS, cutJS, maxChars, maxTitle, maxURL, maxType, maxLabel)
 	err := b.withWebPage(ctx, func(p *cdp.Page) error {
 		return onPage(ctx, p, tabWorkTimeout, func(ctx context.Context) error { return p.EvalIsolated(ctx, script, &page) })
 	})
@@ -630,32 +654,82 @@ func legacyIPv4(host string) net.IP {
 	return net.IPv4(byte(value>>24), byte(value>>16), byte(value>>8), byte(value))
 }
 
+// reachesJS defines what the click scripts share. at says what takes a click at
+// a point: the element, or something that passes it on, such as its label; a
+// frame, whose page would decide what the click does; or a cover. The page can
+// change all of this when the pointer comes, so it is asked again just before the
+// button goes down, and a listener says afterwards whether the element got it.
+const reachesJS = `const kivora = globalThis.kivora;
+  const el = kivora?.get(%d);
+  const at = (x, y) => {
+    const top = document.elementFromPoint(x, y);
+    if (!top) return "covered";
+    if (top !== el && (top.tagName === "IFRAME" || top.tagName === "FRAME" || top.tagName === "OBJECT" || top.tagName === "EMBED")) return "frame";
+    const reaches = top === el || el.contains(top) || top.contains(el) ||
+      [...(el.labels || [])].some(label => label === top || label.contains(top));
+    return reaches ? "ok" : "covered";
+  };`
+
 // elementPointJS scrolls to an element and finds where a click reaches it: a
 // transparent layer over it would take the click instead, and the page would
-// decide what that does. A link over several lines has several boxes.
+// decide what that does. A link over several lines has several boxes. It then
+// listens for the click on the window, where it starts. A page that stops it
+// there makes the click count as lost, which is the safe side.
 const elementPointJS = `(() => {
-  const el = globalThis.kivora?.get(%d);
+  ` + reachesJS + `
   if (!el) return null;
   el.scrollIntoView({block: "center", inline: "center"});
-  const reaches = (x, y) => {
-    const top = document.elementFromPoint(x, y);
-    return top && (top === el || el.contains(top) || top.contains(el) ||
-      [...(el.labels || [])].some(label => label === top || label.contains(top)));
-  };
+  let found = "covered";
   for (const r of el.getClientRects()) {
     const x = r.left + r.width / 2, y = r.top + r.height / 2;
-    if (r.width > 0 && r.height > 0 && reaches(x, y)) return {x, y, covered: false};
+    if (r.width <= 0 || r.height <= 0) continue;
+    const what = at(x, y);
+    if (what === "ok") {
+      kivora.click?.stop();
+      const top = document.elementFromPoint(x, y);
+      const click = {reached: false};
+      // Only a click of the input devices counts, on the element, on what was
+      // under the point for it, or on one of its labels, which pass it on.
+      const listen = e => {
+        const t = e.target;
+        if (e.isTrusted && t instanceof Node && (el === t || el.contains(t) || t === top ||
+            [...(el.labels || [])].some(label => label.contains(t)))) click.reached = true;
+      };
+      click.stop = () => removeEventListener("click", listen, true);
+      addEventListener("click", listen, true);
+      kivora.click = click;
+      return {x, y, at: "ok"};
+    }
+    if (what === "frame") found = "frame";
   }
-  return {covered: true};
+  return {at: found};
 })()`
 
-// ClickElement clicks an element numbered by the last ReadPage.
+// elementStillAtJS asks again what takes a click at a point.
+const elementStillAtJS = `(() => {
+  ` + reachesJS + `
+  if (!el || !kivora.click) return "missing";
+  return at(%f, %f);
+})()`
+
+// clickedJS says whether the element got the click, and stops listening.
+const clickedJS = `(() => {
+  const click = globalThis.kivora?.click;
+  if (!click) return "gone";
+  click.stop();
+  globalThis.kivora.click = null;
+  return click.reached ? "reached" : "missed";
+})()`
+
+// ClickElement clicks an element numbered by the last ReadPage. It refuses a
+// click that something else would take, and says if the page moved something
+// under the pointer at the last moment, which then took it.
 func (b *Browser) ClickElement(ctx context.Context, id int) (Tab, error) {
-	var switched bool
+	var switched, unchecked bool
 	err := b.withActive(ctx, func(conn *cdp.Conn, p *cdp.Page) error {
 		var pt *struct {
-			X, Y    float64
-			Covered bool
+			X, Y float64
+			At   string
 		}
 		if err := eval(ctx, p, fmt.Sprintf(elementPointJS, id), &pt); err != nil {
 			return err
@@ -663,25 +737,43 @@ func (b *Browser) ClickElement(ctx context.Context, id int) (Tab, error) {
 		if pt == nil {
 			return fmt.Errorf("element %d not found; call browser_read_page again, the page may have changed", id)
 		}
-		if pt.Covered {
-			return fmt.Errorf("element %d is out of view or covered by something else, which would take the click: take a screenshot, and use computer_click if that is what you mean", id)
-		}
-		err := onPage(ctx, p, tabWorkTimeout, func(ctx context.Context) error {
-			for _, ev := range []map[string]any{
-				{"type": "mouseMoved", "x": pt.X, "y": pt.Y},
-				{"type": "mousePressed", "x": pt.X, "y": pt.Y, "button": "left", "clickCount": 1},
-				{"type": "mouseReleased", "x": pt.X, "y": pt.Y, "button": "left", "clickCount": 1},
-			} {
-				if err := p.Call(ctx, "Input.dispatchMouseEvent", ev, nil); err != nil {
-					return err
-				}
-			}
-			return nil
-		})
-		if err != nil {
+		if err := atError(id, pt.At, false); err != nil {
 			return err
 		}
+		mouse := func(ev map[string]any) error {
+			return onPage(ctx, p, tabWorkTimeout, func(ctx context.Context) error {
+				return p.Call(ctx, "Input.dispatchMouseEvent", ev, nil)
+			})
+		}
+		if err := mouse(map[string]any{"type": "mouseMoved", "x": pt.X, "y": pt.Y}); err != nil {
+			return err
+		}
+		var at string
+		if err := eval(ctx, p, fmt.Sprintf(elementStillAtJS, id, pt.X, pt.Y), &at); err != nil {
+			return err
+		}
+		if err := atError(id, at, true); err != nil {
+			eval(ctx, p, clickedJS, new(string))
+			return err
+		}
+		for _, typ := range []string{"mousePressed", "mouseReleased"} {
+			if err := mouse(map[string]any{"type": typ, "x": pt.X, "y": pt.Y, "button": "left", "clickCount": 1}); err != nil {
+				return err
+			}
+		}
+		var clicked string
+		if err := eval(ctx, p, clickedJS, &clicked); err != nil {
+			// The click led to another page at once: nothing is left to ask.
+			clicked = "gone"
+		}
+		switch clicked {
+		case "missed":
+			return fmt.Errorf("the click did not reach element %d: the page moved something under the pointer, which got the click instead. Take a screenshot before going on", id)
+		case "gone":
+			unchecked = true
+		}
 		time.Sleep(300 * time.Millisecond)
+		var err error
 		switched, err = b.settle(ctx, conn, p)
 		return err
 	})
@@ -689,8 +781,29 @@ func (b *Browser) ClickElement(ctx context.Context, id int) (Tab, error) {
 		return Tab{}, err
 	}
 	tab, err := b.Current(ctx)
-	tab.Switched = switched
+	tab.Switched, tab.Unchecked = switched, unchecked
 	return tab, err
+}
+
+// atError explains why a click at a point would not reach element id. Moved says
+// that the page changed it when the pointer came.
+func atError(id int, at string, moved bool) error {
+	when := ""
+	if moved {
+		when = " when the pointer came over it; nothing was clicked"
+	}
+	switch at {
+	case "ok":
+		return nil
+	case "frame":
+		return fmt.Errorf("element %d is under a frame, whose page would take the click%s: take a screenshot, and use computer_click if that is what you mean", id, when)
+	case "missing":
+		return fmt.Errorf("element %d is gone%s; call browser_read_page again", id, when)
+	}
+	if moved {
+		return fmt.Errorf("the page put something over element %d%s: take a screenshot, and use computer_click if that is what you mean", id, when)
+	}
+	return fmt.Errorf("element %d is out of view or covered by something else, which would take the click: take a screenshot, and use computer_click if that is what you mean", id)
 }
 
 // settle waits for what an action in tab p led to, which may be another tab or

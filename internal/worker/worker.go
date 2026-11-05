@@ -429,6 +429,9 @@ func (c *capped) Write(p []byte) (int, error) {
 	return n, nil
 }
 
+// String gives the output. Where the middle was dropped, the note has the form of
+// a cut mark of the secrets package: the cleaning of the result hides a stored
+// value that the cut leaves in part on either side of it.
 func (c *capped) String() (string, bool) {
 	if c.dropped == 0 {
 		return string(c.head) + string(c.tail), false

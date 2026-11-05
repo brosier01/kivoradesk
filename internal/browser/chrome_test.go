@@ -521,3 +521,109 @@ func TestFillSecretKeepsTheFieldMasked(t *testing.T) {
 		}
 	}
 }
+
+// MCP-03: the page waits for the pointer to come over the element, then puts
+// something else under it. The click is refused before the button goes down, or
+// reported as lost when the page moves things at the last moment.
+func TestClickThatThePageMovesIsCaught(t *testing.T) {
+	endpoint := startChrome(t)
+	const target = `<button id=target style="position:absolute;left:50px;top:50px;width:200px;height:80px" onclick="document.title='TARGET CLICKED'">target</button>`
+	cover := func(event, what string) string {
+		return `<title>m</title><body style="margin:0">` + target + `<script>
+let done = false;
+document.addEventListener('` + event + `', () => {
+  if (done) return;
+  done = true;
+  const c = document.createElement('` + what + `');
+  c.style = 'position:absolute;left:0;top:0;width:400px;height:300px;opacity:0.01;border:0';
+  c.onclick = () => { document.title = 'DECOY CLICKED' };
+  document.body.append(c);
+}, true);
+</script>`
+	}
+	port := site(t, map[string]string{
+		"/move":     cover("mousemove", "div"),
+		"/frame":    cover("mousemove", "iframe"),
+		"/down":     cover("mousedown", "div"),
+		"/pointer":  cover("pointerdown", "div"),
+		"/label":    `<title>l</title><body style="margin:0"><input type=checkbox id=c style="position:absolute;left:60px;top:60px" onclick="document.title='LABEL OK'"><label for=c style="position:absolute;left:0;top:0;width:300px;height:200px">pick</label>`,
+		"/nested":   `<title>n</title><body style="margin:0"><a href="#done" style="display:inline-block;padding:20px;font-size:30px" onclick="document.title='LINK OK'"><span>open</span></a>`,
+		"/navigate": `<title>v</title><body><a href="/nested" style="font-size:30px">go</a>`,
+	})
+	origin := "http://127.0.0.1:" + port
+	b := &Browser{Endpoint: endpoint}
+	defer b.reset()
+	ctx := testContext(t, 2*time.Minute)
+	click := func(path, label string) (Tab, error) {
+		t.Helper()
+		if _, err := b.Navigate(ctx, origin+path); err != nil {
+			t.Fatal(err)
+		}
+		page, err := b.ReadPage(ctx, 100)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range page.Elements {
+			if e.Label == label {
+				return b.ClickElement(ctx, e.ID)
+			}
+		}
+		t.Fatalf("%s: no element %q in %+v", path, label, page.Elements)
+		return Tab{}, nil
+	}
+	title := func() string {
+		tab, err := b.Current(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return tab.Title
+	}
+	for path, want := range map[string]string{"/move": "put something over", "/frame": "under a frame", "/down": "did not reach", "/pointer": "did not reach"} {
+		_, err := click(path, "target")
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s: %v, want %q", path, err, want)
+		}
+		if got := title(); got == "TARGET CLICKED" || (path != "/down" && path != "/pointer" && got == "DECOY CLICKED") {
+			t.Errorf("%s: title %q", path, got)
+		}
+	}
+	// What passes the click on to the element still works.
+	for path, label := range map[string]string{"/label": "on", "/nested": "open"} {
+		if _, err := click(path, label); err != nil {
+			t.Errorf("%s: %v", path, err)
+		}
+		if got := title(); got != "LABEL OK" && got != "LINK OK" {
+			t.Errorf("%s: title %q", path, got)
+		}
+	}
+	tab, err := click("/navigate", "go")
+	if err != nil || !strings.HasSuffix(tab.URL, "/nested") {
+		t.Errorf("link: %+v, %v", tab, err)
+	}
+}
+
+// MCP-01: a site echoes a stored value. Wherever ReadPage cuts the text or a
+// label, what is left of the value is next to a cut mark, and cleaned away.
+func TestCutPageTextIsMarked(t *testing.T) {
+	endpoint := startChrome(t)
+	const value = "Hunter2-Secret!x"
+	port := site(t, map[string]string{"/echo": `<title>e</title><body><p>You typed: ` + value + ` (done)</p>
+<button>` + strings.Repeat("b", 110) + value + `</button>`})
+	b := &Browser{Endpoint: endpoint}
+	defer b.reset()
+	ctx := testContext(t, 2*time.Minute)
+	if _, err := b.Navigate(ctx, "http://127.0.0.1:"+port+"/echo"); err != nil {
+		t.Fatal(err)
+	}
+	clean := secrets.NewCleaner([]string{value})
+	for n := len(secrets.CutMark) + 8; n < len(secrets.CutMark)+40; n++ {
+		page, err := b.ReadPage(ctx, n)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := clean.Clean(fmt.Sprint(page))
+		if strings.Contains(got, "Hunt") || !strings.Contains(page.Text, secrets.CutMark) {
+			t.Fatalf("max %d: %q", n, got)
+		}
+	}
+}
