@@ -20,6 +20,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -30,6 +31,9 @@ const (
 	maxTunnels    = 32
 	dialTimeout   = 15 * time.Second
 	tunnelTimeout = 15 * time.Minute // above the longest shell command
+	// A destination fits in this, and the worker decides what comes in.
+	maxHeaderBytes = 8 << 10
+	maxLoggedName  = 255
 )
 
 func main() {
@@ -38,7 +42,7 @@ func main() {
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	srv := &http.Server{Addr: *listen, Handler: newProxy(*list, log), ReadHeaderTimeout: 10 * time.Second}
+	srv := newServer(*listen, newProxy(*list, log))
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go func() {
@@ -52,11 +56,59 @@ func main() {
 	}
 }
 
+func newServer(listen string, h http.Handler) *http.Server {
+	return &http.Server{Addr: listen, Handler: h, ReadHeaderTimeout: 10 * time.Second, MaxHeaderBytes: maxHeaderBytes}
+}
+
 type proxy struct {
 	list    string
 	dial    func(ctx context.Context, network, address string) (net.Conn, error)
 	log     *slog.Logger
 	tunnels chan struct{}
+	quiet   logLimit
+}
+
+// logLimit keeps the log of what the worker asks small, since it asks what it
+// wants as often as it wants: at most one line per second, the others counted.
+type logLimit struct {
+	mu      sync.Mutex
+	next    time.Time
+	dropped int
+}
+
+// allow reports whether a line may be written, and how many were not since the
+// last one.
+func (l *logLimit) allow(now time.Time) (bool, int) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if now.Before(l.next) {
+		l.dropped++
+		return false, 0
+	}
+	l.next = now.Add(time.Second)
+	dropped := l.dropped
+	l.dropped = 0
+	return true, dropped
+}
+
+// note logs what the worker caused, with its destination cut to a sane length.
+func (p *proxy) note(level slog.Level, msg, host, port string, attrs ...any) {
+	ok, dropped := p.quiet.allow(time.Now())
+	if !ok {
+		return
+	}
+	attrs = append([]any{"host", cutName(host), "port", cutName(port)}, attrs...)
+	if dropped > 0 {
+		attrs = append(attrs, "not_logged", dropped)
+	}
+	p.log.Log(context.Background(), level, msg, attrs...)
+}
+
+func cutName(name string) string {
+	if len(name) > maxLoggedName {
+		return name[:maxLoggedName] + "..."
+	}
+	return name
 }
 
 func newProxy(list string, log *slog.Logger) *proxy {
@@ -81,7 +133,7 @@ func (p *proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !allowed(string(data), host, port) {
-		p.log.Warn("refused", "host", host, "port", port)
+		p.note(slog.LevelWarn, "refused", host, port)
 		http.Error(w, fmt.Sprintf("kivora-proxy: %s is not allowed for shell commands. Use browser_download, or ask the human to allow it.", r.Host), http.StatusForbidden)
 		return
 	}
@@ -96,7 +148,7 @@ func (p *proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	remote, err := p.dial(ctx, "tcp", r.Host)
 	if err != nil {
-		p.log.Warn("connect", "host", host, "port", port, "err", err)
+		p.note(slog.LevelWarn, "connect", host, port, "err", err)
 		http.Error(w, "kivora-proxy: cannot reach "+r.Host, http.StatusBadGateway)
 		return
 	}
@@ -113,7 +165,7 @@ func (p *proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if _, err := io.WriteString(client, "HTTP/1.1 200 Connection established\r\n\r\n"); err != nil {
 		return
 	}
-	p.log.Info("tunnel", "host", host, "port", port)
+	p.note(slog.LevelInfo, "tunnel", host, port)
 	done := make(chan struct{}, 2)
 	go func() {
 		io.Copy(remote, buffered)
