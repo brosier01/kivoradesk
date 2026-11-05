@@ -187,6 +187,7 @@ add_laptop() {
 	log "key authorized. Now run this on the laptop:"
 	cat <<-EOF
 
+		touch ~/.ssh/config && chmod go-w ~/.ssh/config
 		cat >>~/.ssh/config <<'CONFIG'
 
 		# KivoraDesk. "ssh -N kivoradesk" opens the live view on http://kivora.localhost:$WEB_PORT
@@ -451,7 +452,7 @@ doctor() {
 # reach: each target is first checked from here, so that one which is down does
 # not count as blocked. The list of allowed services is reported, not checked.
 check_isolation() {
-	local failed=0 targets=() always=() target host port router="" gateway="" addr kind
+	local failed=0 targets=() always=() target host port gateway="" addr kind
 	local -A checked=()
 	reachable_from_container() { { timeout 2 bash -c "</dev/tcp/$1/$2"; } 2>/dev/null; }
 	reachable_from_vm() { admin_ssh "nc -z -w2 $1 $2" 2>/dev/null; }
@@ -585,8 +586,7 @@ requests_pending() {
 # entrypoint removes the request before it starts the VM again.
 restart_vm() {
 	shut_down
-	local i
-	for i in $(seq 60); do
+	for _ in $(seq 60); do
 		requests_pending || break
 		sleep 1
 	done
@@ -594,7 +594,7 @@ restart_vm() {
 		log "the VM does not stop: forcing it"
 		vmctl quit || true
 	fi
-	for i in $(seq $((INSTALL_TIMEOUT + 300))); do
+	for _ in $(seq $((INSTALL_TIMEOUT + 300))); do
 		[[ ! -f $READY ]] || return 0
 		if ! requests_pending && [[ -f $DEGRADED ]]; then
 			die "the VM did not come back: $(cat "$DEGRADED")"
