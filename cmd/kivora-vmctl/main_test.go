@@ -26,6 +26,7 @@ type fakeVM struct {
 	freezeFail bool
 	freezeHang bool // the freeze gets no answer until later
 	leftover   bool // an earlier run left its job in QEMU
+	vmStatus   string
 	events     chan map[string]any
 }
 
@@ -97,7 +98,16 @@ func (v *fakeVM) serveQMP(c net.Conn) {
 				send(map[string]any{"return": []map[string]any{}})
 			}
 		case "query-status":
-			send(map[string]any{"return": map[string]any{"status": "running"}})
+			status := "running"
+			if v.vmStatus != "" {
+				status = v.vmStatus
+			}
+			send(map[string]any{"return": map[string]any{"status": status}})
+		case "query-block":
+			send(map[string]any{"return": []map[string]any{
+				{"device": "sys"},
+				{"device": "data", "inserted": map[string]any{"image": map[string]any{"virtual-size": 1 << 34, "actual-size": 1 << 20}}},
+			}})
 		case "blockdev-add":
 			if v.addError != "" {
 				send(map[string]any{"error": map[string]any{"desc": v.addError}})
@@ -144,6 +154,9 @@ func (v *fakeVM) serveQGA(c net.Conn) {
 			continue
 		}
 		v.record("qga " + r.Execute)
+		if r.Execute == "guest-shutdown" {
+			continue // no answer when it works
+		}
 		if r.Execute == "guest-fsfreeze-freeze-list" && v.freezeHang {
 			continue
 		}
@@ -301,6 +314,83 @@ func TestStatusAndAgent(t *testing.T) {
 	}
 }
 
+func TestShutdownUsesBothWaysThatNeedNoNetwork(t *testing.T) {
+	v := newFakeVM(t)
+	v.start()
+	if err := run(context.Background(), v.qmp, v.qga, []string{"shutdown"}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool {
+		seen := v.seen()
+		return slicesContains(seen, "qga guest-shutdown") && slicesContains(seen, "qmp system_powerdown") && !slicesContains(seen, "qmp cont")
+	}, func() string { return strings.Join(v.seen(), "\n") })
+}
+
+func TestShutdownResumesAPausedVMFirst(t *testing.T) {
+	v := newFakeVM(t)
+	v.vmStatus = "io-error"
+	v.start()
+	if err := run(context.Background(), v.qmp, v.qga, []string{"shutdown"}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool {
+		seen := v.seen()
+		return len(seen) > 1 && seen[0] == "qmp query-status" && seen[1] == "qmp cont"
+	}, func() string { return strings.Join(v.seen(), "\n") })
+}
+
+func TestShutdownWithOneWayLeft(t *testing.T) {
+	onlyQMP := newFakeVM(t)
+	onlyQMP.listen(onlyQMP.qmp, onlyQMP.serveQMP)
+	if err := run(context.Background(), onlyQMP.qmp, onlyQMP.qga, []string{"shutdown"}); err != nil {
+		t.Errorf("without the agent: %v", err)
+	}
+	onlyAgent := newFakeVM(t)
+	onlyAgent.listen(onlyAgent.qga, onlyAgent.serveQGA)
+	if err := run(context.Background(), onlyAgent.qmp, onlyAgent.qga, []string{"shutdown"}); err != nil {
+		t.Errorf("without QEMU's socket: %v", err)
+	}
+	none := newFakeVM(t)
+	if err := run(context.Background(), none.qmp, none.qga, []string{"shutdown"}); err == nil {
+		t.Error("nothing to send it to, and no error")
+	}
+}
+
+func TestContAndSize(t *testing.T) {
+	v := newFakeVM(t)
+	v.start()
+	if err := run(context.Background(), v.qmp, "", []string{"cont"}); err != nil {
+		t.Error(err)
+	}
+	q, err := dialQMP(v.qmp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer q.close()
+	virtual, actual, err := q.diskSize("data")
+	if err != nil || virtual != 1<<34 || actual != 1<<20 {
+		t.Errorf("got %d, %d, %v", virtual, actual, err)
+	}
+	if _, _, err := q.diskSize("sys"); err == nil {
+		t.Error("a drive without a disk has a size")
+	}
+	if _, _, err := q.diskSize("nothing"); err == nil {
+		t.Error("an unknown disk has a size")
+	}
+	if !slicesContains(v.seen(), "qmp cont") {
+		t.Errorf("got %q", v.seen())
+	}
+}
+
+func slicesContains(list []string, s string) bool {
+	for _, x := range list {
+		if x == s {
+			return true
+		}
+	}
+	return false
+}
+
 func TestAgentOutputIsBounded(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "qga")
 	l, err := net.Listen("unix", path)
@@ -333,7 +423,7 @@ func TestAgentOutputIsBounded(t *testing.T) {
 }
 
 func TestUsage(t *testing.T) {
-	for _, args := range [][]string{nil, {"nonsense"}, {"backup", "data"}, {"status", "extra"}} {
+	for _, args := range [][]string{nil, {"nonsense"}, {"backup", "data"}, {"status", "extra"}, {"size"}, {"cont", "x"}, {"shutdown", "x"}} {
 		if err := run(context.Background(), "", "", args); err == nil || !strings.Contains(err.Error(), "usage") {
 			t.Errorf("%v: got %v", args, err)
 		}
