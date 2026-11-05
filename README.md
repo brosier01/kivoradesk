@@ -15,7 +15,7 @@ over SSH. You can watch the desktop live and take over at any time.
 > **Status:** early development, first public release. Claude Code on a laptop
 > drives the VM through the MCP server (web research, forms, PDFs, shell, files,
 > credentials) while the human watches and can take over, with backups, recovery,
-> a 30-scenario reliability suite at 100 % and a published
+> a reliability suite of complete workflows and a published
 > [benchmark](docs/benchmark.md).
 
 ## How it works
@@ -25,8 +25,8 @@ Laptop                              Server (Linux x86_64, KVM)
 ┌──────────────────────┐            ┌──────────────────────────────────────┐
 │ Claude Code          │── SSH ────▶│ VM "kivoradesk" (Alpine Linux)       │
 │  └ MCP client (stdio)│            │  ├ MCP server (kivora-mcp)           │
-│ Browser: live view   │── private ▶│  ├ Xvfb + Openbox, 1280x800          │
-└──────────────────────┘   network  │  ├ Chromium, persistent profile      │
+│ Browser: live view   │── SSH ────▶│  ├ Xvfb + Openbox, 1280x800          │
+└──────────────────────┘   tunnel   │  ├ Chromium, persistent profile      │
                                     │  ├ /workspace (durable files)        │
                                     │  └ VNC + CDP on localhost only       │
                                     └──────────────────────────────────────┘
@@ -44,13 +44,15 @@ Laptop                              Server (Linux x86_64, KVM)
 ## Install
 
 **The server** hosts the VM. It needs Linux on x86_64 with KVM (a cloud server must
-expose it), Docker with Compose, 2 vCPU, 4 GiB of memory for the VM and up to 32 GiB
-of disk, plus the backups. Tested on Ubuntu 24.04, Debian 13 and Fedora 44 with SELinux
-enforcing, with their own Docker packages. macOS, Windows, FreeBSD and ARM cannot host
-the VM for now.
+expose it), Docker Engine 25 or later with Compose v2, 2 vCPU, 4 GiB of memory for the
+VM and up to 32 GiB of disk, plus the backups. Tested on Ubuntu 24.04, Debian 13 and
+Fedora 44 with SELinux enforcing, with their own Docker packages, the oldest being
+Docker 26.1 and Compose 2.26. Not tested yet: a cloud server and rootless Docker.
+macOS, Windows, FreeBSD and ARM cannot host the VM for now.
 
-**Your laptop** drives it. It needs OpenSSH and an MCP client such as Claude Code,
-on any system. It can also be the server itself.
+**Your laptop** drives it. It needs OpenSSH and an MCP client such as Claude Code. The
+steps below were tested from Linux, not yet from macOS or Windows. It can also be the
+server itself.
 
 ### On the server
 
@@ -192,10 +194,10 @@ as PDFs in `/workspace`. To watch it, see [Live view](#live-view-from-the-laptop
   Transfers run as `worker`, in `/workspace`: a link left there cannot lead to the
   agent's private files. `scp -O`, the old protocol, does not get this protection.
 
-## Phase 0 results
+## Input accuracy
 
-Measured inside the VM with `kivora-probe` (Alpine 3.24, Chromium 155,
-2 vCPU, 4 GiB RAM). Each action targets a random point; an oracle page loaded
+Measured on 2026-11-05 inside the VM with `kivora-probe` (Alpine 3.24, 2 vCPU,
+4 GiB RAM, in Docker). Each action targets a random point; an oracle page loaded
 over CDP checks the event type, button and exact screen coordinates.
 
 | Action | Attempts | Success |
@@ -203,17 +205,15 @@ over CDP checks the event type, button and exact screen coordinates.
 | Left click | 1000 | 100 % |
 | Double click, right click, wheel | 100 each | 100 % |
 | ASCII typing, Ctrl+A / Backspace | 100 / 25 | 100 % |
-| Non-ASCII typing via xdotool (é, €, œ) | 100 | ~10 % |
+| Non-ASCII typing via xdotool (é, €, œ) | 100 | 21 % |
 
 The MCP server avoids that limit: `computer_type` pastes non-ASCII text
-through the clipboard (100/100 exact in the end-to-end test) and
-`browser_type` inserts text through CDP.
+through the clipboard and `browser_type` inserts text through CDP.
 
-Resources: see the [benchmark](docs/benchmark.md). In short, with 2 vCPU and
-4 GiB: 880 MiB of system disk, about 570 MiB of memory used at idle and
-870 MiB with three real sites open, CPU near zero at idle, and 13 s from a
-reboot to working MCP tools. A new VM is created and provisioned in under a
-minute.
+Resources: see the [benchmark](docs/benchmark.md). In short, measured on
+2026-11-01 with the former libvirt install, 2 vCPU and 4 GiB: 880 MiB of system
+disk, about 570 MiB of memory used at idle and 870 MiB with three real sites open,
+CPU near zero at idle, and 13 s from a reboot to working MCP tools.
 
 ## Roadmap
 
@@ -463,7 +463,8 @@ reasoning:
 | Persistence and faults | login kept across a browser restart, credentials, Chromium crash, Internet loss |
 
 Run it on the server, in this directory, with the server set up as a
-[laptop](#on-your-laptop) and the live view tunnel open:
+[laptop](#on-your-laptop) and the live view tunnel open. Building it needs Go 1.27.3,
+which the install does not:
 
 ```sh
 ssh -N kivoradesk &
@@ -473,7 +474,7 @@ bin/kivora-scenarios -mcp "ssh -o ClearAllForwardings=yes -T kivoradesk /usr/loc
   -admin "docker compose exec -T kivoradesk kivora" -runs 10
 ```
 
-Result on 2026-11-05 (Alpine 3.24, Chromium 155, 2 vCPU, 4 GiB, in Docker): **300/300
+Result on 2026-11-05 (Alpine 3.24, 2 vCPU, 4 GiB, in Docker): **300/300
 runs passed (100 %)**, 10 runs per scenario. Without Internet, navigation
 fails with an explicit error, at once or after its 45-second timeout.
 
@@ -482,7 +483,7 @@ fails with an explicit error, at once or after its 45-second timeout.
 `kivora-bench` reboots the VM and measures boot time, disk use, memory by
 component, idle CPU, the latency of the main tools and memory with real sites
 open. `-compare` shows the change between two runs, to judge an optimization.
-Results and method: [docs/benchmark.md](docs/benchmark.md).
+Results and method: [docs/benchmark.md](docs/benchmark.md). Building it needs Go 1.27.3.
 
 ```sh
 go build -o bin/kivora-bench ./cmd/kivora-bench
@@ -493,7 +494,7 @@ bin/kivora-bench -compare before.json after.json
 
 ## Tests
 
-Unit tests run anywhere: `go test ./...`.
+The tests and the tools below need Go 1.27.3. Unit tests run on Linux: `go test ./...`.
 
 Integration tests run against the VM, on the server, with the server set up as a
 [laptop](#on-your-laptop) and the live view tunnel open (`ssh -N kivoradesk`):
@@ -519,8 +520,11 @@ reach the model.
 
 ```sh
 CGO_ENABLED=0 go build -o bin/kivora-probe ./cmd/kivora-probe
-docker compose exec -T kivoradesk kivora ssh 'cat > /tmp/kivora-probe && chmod 755 /tmp/kivora-probe' < bin/kivora-probe
-docker compose exec -T kivoradesk kivora ssh 'doas -u agent env DISPLAY=:1 /tmp/kivora-probe -n 1000'
+KIVORA=(docker compose exec -T kivoradesk kivora)
+dir=$("${KIVORA[@]}" ssh 'mktemp -d')
+"${KIVORA[@]}" ssh "cat > $dir/kivora-probe && chmod 755 $dir $dir/kivora-probe" < bin/kivora-probe
+"${KIVORA[@]}" ssh "doas -u agent env DISPLAY=:1 $dir/kivora-probe -n 1000"
+"${KIVORA[@]}" ssh "rm -rf $dir"
 ```
 
 Run `kivora-probe -h` for options (`-seed` for reproducible runs, `-json`).
@@ -539,7 +543,7 @@ their own authorized account.
 
 ## License
 
-Apache-2.0 — see [LICENSE](LICENSE).
+Copyright 2026 Bruce Rosier. Apache-2.0 — see [LICENSE](LICENSE).
 
 Kivo, the marmot in `docs/assets/`, is the project mascot and is covered by
 the same license.
