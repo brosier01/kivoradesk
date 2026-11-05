@@ -6,22 +6,44 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestSanitizeName(t *testing.T) {
 	cases := map[string]string{
-		"report.pdf":         "report.pdf",
-		"../../etc/passwd":   "passwd",
-		"..":                 "file",
-		".bashrc":            "bashrc",
-		"a\nb.txt":           "a_b.txt",
-		`C:\Users\x\doc.pdf`: "doc.pdf",
-		"":                   "file",
+		"report.pdf":          "report.pdf",
+		"../../etc/passwd":    "passwd",
+		"..":                  "file",
+		".bashrc":             "bashrc",
+		"a\nb.txt":            "a_b.txt",
+		`C:\Users\x\doc.pdf`:  "doc.pdf",
+		"":                    "file",
+		"-rf":                 "rf",
+		"--checkpoint=1":      "checkpoint=1",
+		" . - name":           "name",
+		"report\u202Efdp.exe": "reportfdp.exe",
+		"a\u200Db\u2066c":     "abc",
+		"bad\xffbyte.txt":     "bad_byte.txt",
+		"\x85name":            "_name",
 	}
 	for in, want := range cases {
 		if got := SanitizeName(in); got != want {
 			t.Errorf("SanitizeName(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+func TestSanitizeNameShortensOnACharacter(t *testing.T) {
+	got := SanitizeName("a" + strings.Repeat("é", 150) + ".pdf")
+	if !utf8.ValidString(got) || !strings.HasSuffix(got, ".pdf") || len(got) > 200 {
+		t.Fatalf("SanitizeName = %q (%d bytes)", got, len(got))
+	}
+	got = SanitizeName(strings.Repeat("x", 250) + "." + strings.Repeat("y", 100))
+	if !utf8.ValidString(got) || len(got) != 200 {
+		t.Fatalf("a long extension: %q (%d bytes)", got, len(got))
+	}
+	if got := SanitizeName(strings.Repeat("x", 200)); len(got) != 200 {
+		t.Fatalf("at the limit: %d bytes", len(got))
 	}
 }
 

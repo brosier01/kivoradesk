@@ -17,27 +17,54 @@ import (
 	"os"
 	"path"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"golang.org/x/sys/unix"
 )
 
-// SanitizeName turns a suggested file name into a safe single path element.
+// maxName is the longest name SanitizeName returns, in bytes, and maxExt the
+// longest extension it keeps when it has to shorten one.
+const (
+	maxName = 200
+	maxExt  = 16
+)
+
+// SanitizeName turns a suggested file name into a safe single path element, which
+// a site chose. It stays valid UTF-8 and readable: control characters and those
+// that reorder text are gone, and it cannot pass for an option of a command.
 func SanitizeName(name string) string {
 	name = path.Base(strings.ReplaceAll(name, "\\", "/"))
 	name = strings.Map(func(r rune) rune {
-		if r < 0x20 || r == 0x7f || r == '/' {
+		switch {
+		case r == utf8.RuneError || r == '/' || unicode.IsControl(r):
 			return '_'
+		case unicode.Is(unicode.Cf, r):
+			return -1
 		}
 		return r
 	}, name)
-	name = strings.TrimLeft(strings.TrimSpace(name), ".")
+	name = strings.TrimLeft(strings.TrimSpace(name), ". -")
 	if name == "" {
-		name = "file"
+		return "file"
 	}
-	if len(name) > 200 {
-		name = name[:200]
+	if len(name) <= maxName {
+		return name
 	}
-	return name
+	ext := path.Ext(name)
+	if len(ext) > maxExt {
+		ext = ""
+	}
+	return cutRunes(strings.TrimSuffix(name, ext), maxName-len(ext)) + ext
+}
+
+// cutRunes shortens s to at most n bytes, on the boundary of a character.
+func cutRunes(s string, n int) string {
+	for len(s) > n {
+		_, size := utf8.DecodeLastRuneInString(s)
+		s = s[:len(s)-size]
+	}
+	return s
 }
 
 // Create writes r into root/dir/name and returns the path relative to root.
