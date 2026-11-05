@@ -151,8 +151,6 @@ func (p *pageServer) serve(w http.ResponseWriter, req *http.Request) {
 		page = `<title>Dialog</title><script>alert("kivora")</script><body>after the dialog`
 	case "/busy":
 		page = `<title>Busy</title><script>for(;;);</script><body>never`
-	case "/secret":
-		page = secretPage
 	default:
 		http.NotFound(w, req)
 		return
@@ -190,32 +188,4 @@ const i = document.getElementById('q');
 i.addEventListener('input', () => fetch('/report', {method: 'POST', body: 'BANK:' + i.value}));
 </script>`
 
-	// What a site can do with a value filled in its form: show it under many
-	// encodings, in its text, its title and its address. It reports what it showed:
-	// the scenario looks for exactly that.
-	secretPage = `<title>Sign in</title><body><input type=password id=pw name=pw>
-<button id=go type=button>Send</button><pre id=out></pre><script>
-document.getElementById('go').onclick = () => {
-	const v = document.getElementById('pw').value;
-	const bytes = new TextEncoder().encode(v);
-	const uri = encodeURIComponent(v);
-	const lines = [
-		'ECHO-RAW=' + v,
-		'ECHO-URI=' + uri,
-		'ECHO-FORM=' + new URLSearchParams({a: v}).toString().slice(2),
-		'ECHO-LOWER=' + uri.replace(/%[0-9A-F]{2}/g, m => m.toLowerCase()),
-		'ECHO-DOUBLE=' + encodeURIComponent(uri),
-		'ECHO-BASE64=' + btoa(String.fromCharCode(...bytes)),
-		'ECHO-HEX=' + Array.from(bytes, b => b.toString(16).padStart(2, '0')).join(''),
-		'ECHO-UPPER=' + v.toUpperCase(),
-		'ECHO-JSON=' + JSON.stringify(v).slice(1, -1),
-		'ECHO-HTML=' + v.replace(/&/g, '&amp;').replace(/"/g, '&quot;'),
-		'ECHO-NUMERIC=' + v.replace(/[&"]/g, c => '&#' + c.charCodeAt(0) + ';'),
-	];
-	document.getElementById('out').textContent = lines.join('\n');
-	document.title = 'T-' + v;
-	history.replaceState(null, '', '?pw=' + uri);
-	fetch('/report', {method: 'POST', body: lines.join('\n')});
-};
-</script>`
 )

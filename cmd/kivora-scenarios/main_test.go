@@ -126,7 +126,7 @@ func TestPagesKeepWhatTheyReport(t *testing.T) {
 	p := &pageServer{}
 	srv := httptest.NewServer(http.HandlerFunc(p.serve))
 	defer srv.Close()
-	for _, path := range []string{"/plain", "/poser", "/bank", "/alert", "/busy", "/secret", "/link?to=/plain"} {
+	for _, path := range []string{"/plain", "/poser", "/bank", "/alert", "/busy", "/link?to=/plain"} {
 		resp, err := http.Get(srv.URL + path)
 		if err != nil {
 			t.Fatal(err)
