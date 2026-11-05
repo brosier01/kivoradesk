@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/brosier01/kivoradesk/internal/secrets"
 	"golang.org/x/sys/unix"
 )
 
@@ -129,6 +130,23 @@ func TestIsolatedCommandLeavesNothingBehind(t *testing.T) {
 func TestIsolatedCommandLeavesNoMemoryOrFiles(t *testing.T) {
 	self, err := os.Executable()
 	if err != nil {
+		t.Fatal(err)
+	}
+	// go test builds this binary under /tmp, which the command does not see: a copy
+	// in the package's directory stays in its reach.
+	dir, err := os.MkdirTemp(".", ".shmget-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	data, err := os.ReadFile(self)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if self, err = filepath.Abs(filepath.Join(dir, "helper")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(self, data, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	name := fmt.Sprintf("kivora-test-%d", os.Getpid())
@@ -325,3 +343,22 @@ func TestValidJSON(t *testing.T) {
 }
 
 func runtimeUnlock() { runtime.UnlockOSThread() }
+
+// MCP-01: the command chooses where its output is cut, and with it what part of
+// a stored value it prints is left on each side. The cleaning of the result
+// hides those parts, from the length it recognizes.
+func TestCutOutputLeavesNoPartOfAValue(t *testing.T) {
+	const value = "Hunter2-Secret!é"
+	clean := secrets.NewCleaner([]string{value})
+	for pad := 0; pad < 40; pad++ {
+		c := &capped{max: 32}
+		c.Write([]byte(strings.Repeat(".", pad) + value + strings.Repeat("-", 30) + value + strings.Repeat(".", pad)))
+		out, _ := c.String()
+		got := clean.Clean(out)
+		for k := 5; k < len(value); k++ { // a part of 4 characters may be shorter than 5 bytes, é is two
+			if strings.Contains(got, value[:k]) || strings.Contains(got, value[len(value)-k:]) {
+				t.Fatalf("pad %d: %q cleaned as %q", pad, out, got)
+			}
+		}
+	}
+}

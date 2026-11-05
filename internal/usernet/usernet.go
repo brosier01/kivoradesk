@@ -51,6 +51,12 @@ const (
 	maxDNS        = 64
 	dialTimeout   = 20 * time.Second
 	dnsTimeout    = 10 * time.Second
+	// The VM's kernel forgets a socket it has closed, without telling this
+	// process: once the VM has finished sending, a far end that sends nothing for
+	// this long loses the connection, or it would keep its slot for ever.
+	guestClosedGrace = 60 * time.Second
+	// A connection with no data either way for this long is closed too.
+	flowIdle = time.Hour
 	// Enough for a name with many addresses, within a 512-byte answer.
 	maxDNSAnswers = 16
 )
@@ -116,6 +122,9 @@ type Network struct {
 	open       map[net.Conn]struct{}
 	generation uint64
 
+	// How long a connection may stay quiet, guestClosedGrace and flowIdle.
+	grace, idle time.Duration
+
 	allow      func(netip.Addr, uint16) bool
 	resolvable func(netip.Addr) bool
 	dial       func(ctx context.Context, address string) (net.Conn, error)
@@ -135,6 +144,8 @@ func New(log *slog.Logger) (*Network, error) {
 		log:        log,
 		flows:      make(chan struct{}, maxFlows),
 		open:       map[net.Conn]struct{}{},
+		grace:      guestClosedGrace,
+		idle:       flowIdle,
 		allow:      func(ip netip.Addr, _ uint16) bool { return Allowed(ip) },
 		resolvable: Allowed,
 		dial: func(ctx context.Context, address string) (net.Conn, error) {
@@ -374,7 +385,7 @@ func (n *Network) forward(r *tcp.ForwarderRequest) {
 		return
 	}
 	defer n.untrack(in, out)
-	relay.Join(in, out)
+	relay.JoinQuiet(in, out, n.grace, n.idle)
 }
 
 // serveDNS answers the VM's name lookups with the resolver of this computer.

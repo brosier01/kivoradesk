@@ -10,6 +10,9 @@ break compatibility.
 First public release: an install reduced to `git clone` and `docker compose up`, and
 firmer boundaries between the web, the agent and the server.
 
+Earlier versions were never published, and there is no upgrade path from them: the
+libvirt install and its `scripts/vm` are gone. Install 0.4.0 anew as in the README.
+
 ### Added
 
 - **Docker install.** `docker compose up -d --wait` builds the image, creates the VM

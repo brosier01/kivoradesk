@@ -32,6 +32,9 @@ jobs:
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
       - name: Unit tests
         run: go test -race ./...
+        env:
+          # Out of /tmp, which the isolated commands of the tests replace.
+          GOTMPDIR: ${{ runner.temp }}
       - name: Known vulnerabilities
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
       - name: Shell scripts parse

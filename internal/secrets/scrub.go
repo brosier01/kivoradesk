@@ -18,6 +18,21 @@ const Replacement = "[secret hidden]"
 // such as a PIN, would garble ordinary text: it is hidden as a whole word only.
 const minAnywhere = 4
 
+// CutMark marks where a text was cut. Cut in two, a value is no longer
+// recognized: next to a mark, Clean also hides what may be the start or the end
+// of one, from minAnywhere characters. Any "[... note ...]" is a mark, such as the
+// "[... 120 bytes omitted ...]" of a command's output, with a line break or not
+// between it and the text. Cut a text after cleaning it where possible: a part
+// shorter than minAnywhere is not hidden.
+const CutMark = "[... cut ...]"
+
+// maxMarkNote bounds the note inside a cut mark.
+const maxMarkNote = 64
+
+// maxEscape is the most bytes an encoded character takes for a byte of the value:
+// an entity such as &#0000065; for a letter.
+const maxEscape = 12
+
 // A Cleaner hides values from a text. A site can display what it was sent, as is
 // or encoded: an echo of the form, the URL of a search, a script's own encoding.
 // It is a safety net, for the encodings that sites and browsers commonly use,
@@ -55,8 +70,8 @@ func NewCleaner(values []string) *Cleaner {
 		c.first[unicode.ToUpper(rune(form[0]))] = true
 	}
 	if len(c.values)+len(c.short) > 0 {
-		// Where an encoded character starts.
-		c.first['%'], c.first['&'], c.first['\\'] = true, true, true
+		// Where an encoded character starts, and a cut mark.
+		c.first['%'], c.first['&'], c.first['\\'], c.first['['] = true, true, true, true
 	}
 	return c
 }
@@ -80,6 +95,28 @@ func (c *Cleaner) Clean(text string) string {
 	for i := 0; i < len(text); {
 		if !c.first[text[i]] {
 			i++
+			continue
+		}
+		if mark := cutMarkAt(text, i); mark > 0 {
+			start, before := c.startBefore(text, last, i)
+			after, end := c.endAfter(text, mark)
+			if start < 0 && end < 0 {
+				i = mark
+				continue
+			}
+			if start >= 0 {
+				b.WriteString(text[last:start])
+				b.WriteString(Replacement)
+				b.WriteString(text[before:mark])
+			} else {
+				b.WriteString(text[last:mark])
+			}
+			i, last = mark, mark
+			if end >= 0 {
+				b.WriteString(text[mark:after])
+				b.WriteString(Replacement)
+				i, last = end, end
+			}
 			continue
 		}
 		end := c.longestAt(text, i)
@@ -333,4 +370,139 @@ func base64Forms(value string) []string {
 		}
 	}
 	return forms
+}
+
+// cutMarkAt returns where a cut mark starting at text[i] ends, or -1.
+func cutMarkAt(text string, i int) int {
+	const open, close = "[... ", " ...]"
+	if !strings.HasPrefix(text[i:], open) {
+		return -1
+	}
+	rest := text[i+len(open):]
+	rest = rest[:min(len(rest), maxMarkNote+len(close))]
+	end := strings.Index(rest, close)
+	if end < 0 || strings.ContainsAny(rest[:end], "[]\n") {
+		return -1
+	}
+	return i + len(open) + end + len(close)
+}
+
+// startBefore looks for the start of a value that a cut left just before a mark at
+// text[at], no further back than from. It returns where that part starts and
+// ends, or -1.
+func (c *Cleaner) startBefore(text string, from, at int) (start, end int) {
+	end = at
+	if end > from && text[end-1] == '\n' {
+		end--
+	}
+	// A cut in the middle of a character leaves its first bytes.
+	stop := end
+	for k := 1; k < utf8.UTFMax && stop-k >= from; k++ {
+		if utf8.RuneStart(text[stop-k]) {
+			if !utf8.FullRuneInString(text[stop-k : stop]) {
+				stop -= k
+			}
+			break
+		}
+	}
+	start = -1
+	earliest := func(s int) {
+		if start < 0 || s < start {
+			start = s
+		}
+	}
+	for _, value := range c.values {
+		lo := max(from, stop-maxEscape*len(string(value))-maxEscape)
+		for s := lo; s <= stop-minAnywhere && (start < 0 || s < start); s++ {
+			if c.first[text[s]] && startsValue(text, s, stop, value, 0) {
+				earliest(s)
+				break
+			}
+		}
+	}
+	for _, form := range c.exact {
+		for s := max(from, stop-len(form)); s <= stop-minAnywhere; s++ {
+			if strings.HasPrefix(form, text[s:stop]) {
+				earliest(s)
+				break
+			}
+		}
+	}
+	for _, form := range c.folded {
+		for s := max(from, stop-len(form)); s <= stop-minAnywhere; s++ {
+			if strings.EqualFold(form[:stop-s], text[s:stop]) {
+				earliest(s)
+				break
+			}
+		}
+	}
+	if start < 0 {
+		return -1, -1
+	}
+	return start, end
+}
+
+// startsValue reports whether text[i:end] is how value starts, read as matchValue
+// does, with at least minAnywhere characters of it counting those before.
+func startsValue(text string, i, end int, value []rune, before int) bool {
+	for k, want := range value {
+		if i >= end {
+			return before+k >= minAnywhere
+		}
+		for _, escape := range escapesAt(text[i:end]) {
+			if escape.size > 0 && sameRune(escape.r, want) && startsValue(text, i+escape.size, end, value[k+1:], before+k+1) {
+				return true
+			}
+		}
+		r, n := utf8.DecodeRuneInString(text[i:end])
+		if !sameRune(r, want) {
+			// The cut may have left the first bytes of an encoded character.
+			return strings.IndexByte(`%&\`, text[i]) >= 0 && end-i < maxEscape && before+k >= minAnywhere
+		}
+		i += n
+	}
+	return i == end
+}
+
+// endAfter looks for the end of a value that a cut left just after a mark ending
+// at text[at]. It returns where that part starts and ends, or -1.
+func (c *Cleaner) endAfter(text string, at int) (start, end int) {
+	start = at
+	if start < len(text) && text[start] == '\n' {
+		start++
+	}
+	// A cut in the middle of a character leaves its last bytes.
+	from := start
+	for k := 0; k < utf8.UTFMax-1 && from < len(text) && !utf8.RuneStart(text[from]); k++ {
+		from++
+	}
+	end = -1
+	for _, value := range c.values {
+		for k := range value {
+			if len(value)-k < minAnywhere {
+				break
+			}
+			end = max(end, matchValue(text, from, value[k:]))
+		}
+	}
+	for _, form := range c.exact {
+		for k := range len(form) - minAnywhere + 1 {
+			if strings.HasPrefix(text[from:], form[k:]) {
+				end = max(end, from+len(form)-k)
+				break
+			}
+		}
+	}
+	for _, form := range c.folded {
+		for k := range len(form) - minAnywhere + 1 {
+			if n := len(form) - k; len(text)-from >= n && strings.EqualFold(text[from:from+n], form[k:]) {
+				end = max(end, from+n)
+				break
+			}
+		}
+	}
+	if end < 0 {
+		return -1, -1
+	}
+	return start, end
 }

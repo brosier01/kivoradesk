@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/brosier01/kivoradesk/internal/secrets"
 )
 
 func TestIsWebPage(t *testing.T) {
@@ -124,7 +126,8 @@ func TestLegacyIPv4(t *testing.T) {
 }
 
 func TestCutKeepsWholeCharacters(t *testing.T) {
-	if got := cut("aé", 2); got != "a" {
+	mark := len(secrets.CutMark)
+	if got := cut("aé"+strings.Repeat("x", mark), 2+mark); got != "a"+secrets.CutMark {
 		t.Errorf("cut = %q", got)
 	}
 	if got := cut("abc", 3); got != "abc" {

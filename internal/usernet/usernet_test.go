@@ -542,3 +542,125 @@ func (l *lockedWriter) Write(p []byte) (int, error) {
 	defer l.mu.Unlock()
 	return l.w.Write(p)
 }
+
+// farEnd makes the VM's connections reach a server of the test, and returns
+// each connection it accepts.
+func farEnd(t *testing.T, n *Network) <-chan net.Conn {
+	t.Helper()
+	l, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { l.Close() })
+	far := make(chan net.Conn, 1)
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			t.Cleanup(func() { c.Close() })
+			far <- c
+		}
+	}()
+	n.SetPolicy(func(netip.Addr, uint16) bool { return true })
+	n.dial = func(ctx context.Context, _ string) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, "tcp4", l.Addr().String())
+	}
+	return far
+}
+
+func waitFlows(t *testing.T, n *Network, want int, within time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for len(n.flows) != want && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := len(n.flows); got != want {
+		t.Fatalf("%d slots in use, want %d", got, want)
+	}
+}
+
+// A far end that never closes, after the VM has closed its connection.
+func TestSilentFarEndLosesTheConnection(t *testing.T) {
+	n, g := newGuest(t)
+	n.grace = 200 * time.Millisecond
+	far := farEnd(t, n)
+	c, err := g.dial(timeout(t), netip.MustParseAddr("93.184.216.34"), 443)
+	if err != nil {
+		t.Fatal(err)
+	}
+	remote := <-far
+	waitFlows(t, n, 1, 5*time.Second)
+	c.Close()
+	remote.SetReadDeadline(time.Now().Add(10 * time.Second))
+	if _, err := io.ReadAll(remote); err != nil {
+		t.Fatal(err)
+	}
+	waitFlows(t, n, 0, 5*time.Second)
+	// The far end's side is closed too, not only the VM's.
+	remote.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	var werr error
+	for range 50 {
+		if _, werr = remote.Write([]byte("x")); werr != nil {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if werr == nil {
+		t.Error("the far end can still write")
+	}
+}
+
+// A long answer, after the VM has finished sending its request.
+func TestFarEndCanAnswerAfterTheVMFinished(t *testing.T) {
+	n, g := newGuest(t)
+	n.grace = 200 * time.Millisecond
+	far := farEnd(t, n)
+	c, err := g.dial(timeout(t), netip.MustParseAddr("93.184.216.34"), 443)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	remote := <-far
+	c.(*gonet.TCPConn).CloseWrite()
+	remote.SetReadDeadline(time.Now().Add(10 * time.Second))
+	if _, err := io.ReadAll(remote); err != nil {
+		t.Fatal(err)
+	}
+	got := make([]byte, 1)
+	for range 20 {
+		time.Sleep(50 * time.Millisecond)
+		if _, err := remote.Write([]byte("x")); err != nil {
+			t.Fatal(err)
+		}
+		c.SetReadDeadline(time.Now().Add(5 * time.Second))
+		if _, err := io.ReadFull(c, got); err != nil {
+			t.Fatalf("cut while the far end was answering: %v", err)
+		}
+	}
+	if len(n.flows) != 1 {
+		t.Fatalf("%d slots in use", len(n.flows))
+	}
+	remote.Close()
+	c.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, err := io.ReadAll(c); err != nil {
+		t.Fatal(err)
+	}
+	waitFlows(t, n, 0, 5*time.Second)
+}
+
+func TestIdleConnectionsEnd(t *testing.T) {
+	n, g := newGuest(t)
+	n.idle = 300 * time.Millisecond
+	far := farEnd(t, n)
+	c, err := g.dial(timeout(t), netip.MustParseAddr("93.184.216.34"), 443)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	<-far
+	waitFlows(t, n, 1, 5*time.Second)
+	waitFlows(t, n, 0, 5*time.Second)
+}

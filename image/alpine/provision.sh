@@ -197,6 +197,13 @@ if [ -n "$disk" ]; then
 			exit 1
 		fi
 		mkfs.ext4 -q -L "$DATA_SERIAL" "$disk"
+		# Set the reserved blocks and their group while the disk is unmounted:
+		# the kernel reads s_resgid at mount time only. Run on a mounted disk (as
+		# below) it reaches the on-disk superblock but not the live mount, so the
+		# reserve stays root-only until the next boot, and a worker that fills
+		# /workspace can starve the vault, the audit log, the gateway and the
+		# browser in the meantime.
+		tune2fs -m 5 -g "$RESERVED_GID" "$disk" >/dev/null
 		fresh_data=1
 	fi
 	mkdir -p "$DATA_DIR"
@@ -328,6 +335,18 @@ rc-service sshd reload >/dev/null
 # would also restart its dependents and race with explicit restarts.
 for svc in $(echo "$SERVICES" | tr ' ' '\n' | tac); do
 	rc-service -q "$svc" stop 2>/dev/null || true
+done
+# A start that failed earlier may have left its supervisor behind, which OpenRC
+# no longer knows of: the next start would find the program running and fail.
+for svc in $SERVICES; do
+	pid=$(cat "/run/supervise-$svc.pid" 2>/dev/null) || continue
+	kill "$pid" 2>/dev/null || true
+	for _ in $(seq 50); do
+		kill -0 "$pid" 2>/dev/null || break
+		sleep 0.1
+	done
+	kill -9 "$pid" 2>/dev/null || true
+	rm -f "/run/supervise-$svc.pid"
 done
 for svc in dbus crond $SERVICES; do
 	rc-update add "$svc" default >/dev/null

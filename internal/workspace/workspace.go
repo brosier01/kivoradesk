@@ -8,6 +8,11 @@
 // refusing symlinks and anything outside the workspace, and existing files
 // are never overwritten. The directory stays open while a file is written, so
 // that cleaning up after an error cannot follow what the worker put in its place.
+//
+// The data disk keeps a reserve for the audit log, the vault and the browser
+// profile, and the desktop account may use it. A write therefore stops when
+// the space left to ordinary accounts runs out, so that a download cannot eat
+// the reserve once the worker has filled the workspace.
 package workspace
 
 import (
@@ -29,6 +34,71 @@ const (
 	maxName = 200
 	maxExt  = 16
 )
+
+// A write checks the free space before it starts and again every checkEvery
+// bytes, and stops while minFree bytes are still free outside the reserve.
+const (
+	checkEvery = 4 << 20
+	minFree    = 1 << 20
+)
+
+// ErrDiskFull is returned when a write would use the reserved space.
+var ErrDiskFull = errors.New("the disk is full: the space left is kept for the audit log and the credentials; free some room in /workspace")
+
+// statfs is unix.Fstatfs, replaced in tests.
+var statfs = unix.Fstatfs
+
+// freeSpace returns the bytes free outside the reserve on the disk of fd.
+func freeSpace(fd int) (uint64, error) {
+	var st unix.Statfs_t
+	if err := statfs(fd, &st); err != nil {
+		return 0, fmt.Errorf("check free space: %w", err)
+	}
+	return st.Bavail * uint64(st.Bsize), nil
+}
+
+// spaceWriter writes to f, checking the free space on the disk of fd.
+type spaceWriter struct {
+	f      io.Writer
+	fd     int
+	budget uint64 // bytes it may write before the next check
+}
+
+// refill checks the free space and sets the budget until the next check.
+func (w *spaceWriter) refill() error {
+	free, err := freeSpace(w.fd)
+	if err != nil {
+		return err
+	}
+	if free <= minFree {
+		return ErrDiskFull
+	}
+	w.budget = min(free-minFree, checkEvery)
+	return nil
+}
+
+func (w *spaceWriter) Write(p []byte) (int, error) {
+	written := 0
+	for len(p) > 0 {
+		if w.budget == 0 {
+			if err := w.refill(); err != nil {
+				return written, err
+			}
+		}
+		chunk := p[:min(uint64(len(p)), w.budget)]
+		n, err := w.f.Write(chunk)
+		written += n
+		w.budget -= uint64(n)
+		if errors.Is(err, unix.ENOSPC) {
+			return written, ErrDiskFull
+		}
+		if err != nil {
+			return written, err
+		}
+		p = p[n:]
+	}
+	return written, nil
+}
 
 // SanitizeName turns a suggested file name into a safe single path element, which
 // a site chose. It stays valid UTF-8 and readable: control characters and those
@@ -69,7 +139,8 @@ func cutRunes(s string, n int) string {
 
 // Create writes r into root/dir/name and returns the path relative to root.
 // dir is created if needed (one level). If name exists, " (1)", " (2)"...
-// is inserted before the extension. At most limit bytes are written.
+// is inserted before the extension. At most limit bytes are written, and
+// none of the reserved space (see ErrDiskFull).
 func Create(root, dir, name string, r io.Reader, limit int64) (string, error) {
 	rootFD, err := unix.Open(root, unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
 	if err != nil {
@@ -91,6 +162,12 @@ func Create(root, dir, name string, r io.Reader, limit int64) (string, error) {
 		defer unix.Close(dirFD)
 	}
 
+	// Refuse before creating anything when the disk is already full.
+	w := &spaceWriter{fd: dirFD}
+	if err := w.refill(); err != nil {
+		return "", err
+	}
+
 	name = SanitizeName(name)
 	ext := path.Ext(name)
 	stem := strings.TrimSuffix(name, ext)
@@ -110,7 +187,8 @@ func Create(root, dir, name string, r io.Reader, limit int64) (string, error) {
 			return "", fmt.Errorf("create %s: %w", rel, err)
 		}
 		f := os.NewFile(uintptr(fd), rel)
-		n, err := io.Copy(f, io.LimitReader(r, limit+1))
+		w.f = f
+		n, err := io.Copy(w, io.LimitReader(r, limit+1))
 		if cerr := f.Close(); err == nil {
 			err = cerr
 		}

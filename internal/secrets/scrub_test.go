@@ -126,6 +126,7 @@ func FuzzClean(f *testing.F) {
 	f.Add("hunter2", "x hunter2 y")
 	f.Add("a b", "a+b a%20b &#97; \\u0061")
 	f.Add("é", "%C3%A9 %c3 % %2")
+	f.Add("hunter2-x", "hunter2-[... cut ...]\n-x [... 5 bytes omitted ...]\n")
 	f.Fuzz(func(t *testing.T, value, text string) {
 		c := NewCleaner([]string{value})
 		got := c.Clean(text)
@@ -137,4 +138,53 @@ func FuzzClean(f *testing.F) {
 			t.Fatalf("Clean(%q) with %q = %q", text, value, got)
 		}
 	})
+}
+
+// A value cut in two is no longer recognized: next to a cut mark, each side of
+// it is hidden, whatever the point of the cut.
+func TestCleanHidesWhatACutLeaves(t *testing.T) {
+	const value = "Hunter2-Secret!é"
+	c := NewCleaner([]string{value})
+	forms := map[string]string{
+		"as is":   value,
+		"percent": url.QueryEscape(value),
+		"entity":  strings.ReplaceAll(html.EscapeString(value), "-", "&#45;"),
+		"base64":  base64.StdEncoding.EncodeToString([]byte(value)),
+		"hex":     hex.EncodeToString([]byte(value)),
+	}
+	for name, form := range forms {
+		for cut := 1; cut < len(form); cut++ {
+			for _, mark := range []string{CutMark, "\n[... 120 bytes omitted ...]\n"} {
+				head, tail := "page: "+form[:cut], form[cut:]+" end"
+				got := c.Clean(head + mark + tail)
+				// An encoded part is longer than the characters it holds.
+				shortest := minAnywhere + maxEscape
+				if name == "as is" {
+					shortest = minAnywhere + 1 // é is two bytes
+				}
+				for _, part := range []string{form[:cut], form[cut:]} {
+					if len(part) >= shortest && strings.Contains(got, part) {
+						t.Fatalf("%s cut at %d: Clean = %q", name, cut, got)
+					}
+				}
+				if !strings.HasPrefix(got, "page: ") || !strings.HasSuffix(got, " end") || !strings.Contains(got, mark) {
+					t.Fatalf("%s cut at %d: Clean = %q", name, cut, got)
+				}
+			}
+		}
+	}
+	// Each side alone, as the start or the end of a value.
+	for in, want := range map[string]string{
+		"x Hunter2-Se" + CutMark:                 "x " + Replacement + CutMark,
+		CutMark + "ret!é y":                      CutMark + Replacement + " y",
+		"x Hun" + CutMark + "!é y":               "x Hun" + CutMark + "!é y", // too short to tell
+		"x Hunter2%2" + CutMark:                  "x " + Replacement + CutMark,
+		"x Hunter2-Secret!\xc3" + "\n" + CutMark: "x " + Replacement + "\n" + CutMark,
+		"[... not a mark] Hunter2-Se":            "[... not a mark] Hunter2-Se",
+		"Hunter2-Se and more" + CutMark:          "Hunter2-Se and more" + CutMark,
+	} {
+		if got := c.Clean(in); got != want {
+			t.Errorf("Clean(%q) = %q, want %q", in, got, want)
+		}
+	}
 }

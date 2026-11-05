@@ -40,6 +40,8 @@ done
 # In the namespaces of a command, a new user namespace must be refused.
 su -s /bin/sh worker -c "/usr/local/bin/kivora-mcp worker exec -- 'unshare -Ur true 2>/dev/null && exit 9; exit 0'" </dev/null 2>/dev/null | grep -q '"exit_code":0' && echo "ok shell commands run isolated" || echo "fail shell commands do not run isolated: unprivileged namespaces unavailable?"
 su -s /bin/sh worker -c '/usr/local/bin/kivora-mcp worker valid-json /etc/chromium/policies/managed/kivora.json' </dev/null >/dev/null 2>&1 && echo "ok browser policies installed" || echo "fail browser policies are missing or unreadable: Chromium would ignore them"
+# The kernel reads the reserve's group when it mounts the disk.
+grep -q ' /data ext4 .*resgid=1202' /proc/mounts && echo "ok disk reserve kept for the audit log and the credentials" || echo "fail disk reserve is root's only: kivora ssh 'doas reboot'"
 df -P /workspace / | awk 'NR > 1 { pct = $5 + 0; msg = sprintf("disk %s %d%% used, %d MiB free", $6, pct, $4 / 1024);
 	print (pct >= 90 ? "warn " : "ok ") msg }'
 free -m | awk '/^Mem:/ { print "ok memory " $3 " MiB used, " $7 " MiB available" }'
@@ -57,7 +59,7 @@ fi
 [ -d "/lib/modules/$(uname -r)" ] || echo "warn a new kernel is installed: kivora ssh 'doas reboot'"
 # Chromium may still be starting right after a deployment.
 browser=fail
-for i in $(seq 20); do
+for _ in $(seq 20); do
 	wget -qO- http://127.0.0.1:9222/json/version 2>/dev/null | grep -q Browser && browser=ok && break
 	sleep 1
 done
