@@ -80,6 +80,12 @@ func TestRoutesServeOnlyWhatTheViewerNeeds(t *testing.T) {
 		{"/novnc/vnc.html", true, "localhost:6080", 404},
 		{"/novnc/tests/x.js", true, "localhost:6080", 404},
 		{"/novnc/core/", true, "localhost:6080", 404},
+		{"/novnc/core/..%2fvnc.html", true, "localhost:6080", 404},
+		{"/novnc/core/%2e%2e/vnc.html", true, "localhost:6080", 404},
+		{"/novnc/core/%2e%2e%2ftests/x.js", true, "localhost:6080", 404},
+		{"/novnc/vendor/..%2fvnc.html", true, "localhost:6080", 404},
+		{"/novnc/vendor/..%2fcore/rfb.js", true, "localhost:6080", 404},
+		{"/novnc/core/..%2f..%2f..%2fetc/passwd", true, "localhost:6080", 404},
 		{"/ui/", true, "localhost:6080", 404},
 		{"/", true, "evil.example", 403},
 	} {

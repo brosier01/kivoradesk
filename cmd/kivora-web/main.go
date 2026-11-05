@@ -134,24 +134,68 @@ func run(listen, vncAddr, novnc, stateDir, controlSocket string, log *slog.Logge
 	if err := os.Chmod(controlSocket, 0o660); err != nil {
 		return err
 	}
-	agentSrv := &http.Server{Handler: control.AgentHandler(s.state), ReadHeaderTimeout: 10 * time.Second}
+	// No limit on writing: a wait holds its answer for minutes.
+	agentSrv := &http.Server{
+		Handler:           control.AgentHandler(s.state),
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		IdleTimeout:       2 * time.Minute,
+	}
 	go agentSrv.Serve(ln)
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 	go func() {
+		ticker := time.NewTicker(pruneInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				sessions.prune()
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
 		<-ctx.Done()
 		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
+		close(s.stopping)
 		agentSrv.Close() // waiters hold long requests; do not wait for them
 		srv.Shutdown(shutdown)
+		// Shutdown does not wait for WebSockets, and the viewers still have to
+		// release what they hold.
+		viewers := make(chan struct{})
+		go func() {
+			s.viewers.Wait()
+			close(viewers)
+		}()
+		select {
+		case <-viewers:
+		case <-shutdown.Done():
+		}
 	}()
 
 	log.Info("listening", "addr", listen, "vnc", vncAddr, "control", controlSocket)
-	if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+	if err := srv.Serve(web); !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
+	<-stopped
 	return nil
+}
+
+// newWebServer limits ordinary requests. A WebSocket is hijacked, which clears
+// these deadlines.
+func newWebServer(h http.Handler) *http.Server {
+	return &http.Server{
+		Handler:           h,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      time.Minute,
+		IdleTimeout:       2 * time.Minute,
+	}
 }
 
 func (s *server) routes(static fs.FS, novnc string) http.Handler {
@@ -159,10 +203,14 @@ func (s *server) routes(static fs.FS, novnc string) http.Handler {
 	mux.Handle("GET /{$}", s.page(static))
 	mux.HandleFunc("GET /login", s.login)
 	mux.Handle("GET /ui/", s.auth(http.StripPrefix("/ui/", noListing(http.FileServerFS(static)))))
-	// Only what the viewer loads from noVNC: not its own pages or its tests.
-	novncFiles := s.auth(http.StripPrefix("/novnc/", noListing(http.FileServer(http.Dir(novnc)))))
-	mux.Handle("GET /novnc/core/", novncFiles)
-	mux.Handle("GET /novnc/vendor/", novncFiles)
+	// Only what the viewer loads from noVNC: not its own pages or its tests. Each
+	// prefix has its own root: an encoded ".." goes through the routes, and must
+	// stay inside.
+	for _, dir := range []string{"core", "vendor"} {
+		prefix := "/novnc/" + dir + "/"
+		files := http.FileServer(http.Dir(filepath.Join(novnc, dir)))
+		mux.Handle("GET "+prefix, s.auth(http.StripPrefix(prefix, noListing(files))))
+	}
 	mux.Handle("GET /api/control", s.auth(http.HandlerFunc(s.getControl)))
 	mux.Handle("POST /api/control", s.auth(http.HandlerFunc(s.setControl)))
 	mux.Handle("GET /websockify", s.auth(http.HandlerFunc(s.websockify)))
