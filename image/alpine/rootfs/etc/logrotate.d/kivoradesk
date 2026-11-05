@@ -1,0 +1,8 @@
+# The services keep these files open, and what they log can come from the agent.
+/var/log/kivora-proxy.log /var/log/kivora-web.log {
+	size 10M
+	rotate 3
+	copytruncate
+	missingok
+	notifempty
+}
