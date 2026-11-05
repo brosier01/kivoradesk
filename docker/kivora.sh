@@ -115,6 +115,17 @@ wait_for_ssh() {
 	die "the VM did not become reachable over SSH"
 }
 
+# Alpine removes the running kernel's modules when it installs a new kernel: what
+# needs one loaded, such as the firewall, fails until the VM has restarted on it.
+restart_on_new_kernel() {
+	if ! admin_ssh '[ -d "/lib/modules/$(uname -r)" ]'; then
+		log "new kernel installed: restarting the VM"
+		admin_ssh 'doas reboot' >/dev/null 2>&1 || true
+		sleep 5
+		wait_for_ssh
+	fi
+}
+
 # Install in the VM what this image brings, if that changed.
 install_guest() {
 	local want first_boot=0
@@ -128,6 +139,7 @@ install_guest() {
 	# A new VM is as old as its image, and its browser reads the web from the start.
 	log "upgrading the Alpine packages"
 	admin_ssh 'doas apk update -q && doas apk upgrade -q --available'
+	restart_on_new_kernel
 	log "installing KivoraDesk in the VM"
 	tar -C /opt/kivoradesk/guest -cf - . | admin_ssh '
 		set -e
@@ -137,13 +149,7 @@ install_guest() {
 		cd "$dir" && doas sh ./provision.sh
 	'
 	printf '%s\n' "$want" >"$PROVISIONED"
-	# Alpine removes the running kernel's modules when it installs a new kernel.
-	if ! admin_ssh '[ -d "/lib/modules/$(uname -r)" ]'; then
-		log "new kernel installed: restarting the VM"
-		admin_ssh 'doas reboot' >/dev/null 2>&1 || true
-		sleep 5
-		wait_for_ssh
-	fi
+	restart_on_new_kernel
 }
 
 authorize_key() {
