@@ -37,11 +37,29 @@ start_pre() {
 }
 
 start_post() {
-	# Wait for the display to accept clients before dependents start.
-	local i=0
+	# Wait for the display to accept clients before dependents start. A loaded
+	# server can take seconds: count time, not tries.
+	local deadline=$(($(date +%s) + 30))
 	while ! as_user "xprop -root >/dev/null 2>&1"; do
-		i=$((i + 1))
-		[ $i -ge 50 ] && { eerror "display $KIVORA_DISPLAY did not come up"; return 1; }
+		if [ "$(date +%s)" -ge "$deadline" ]; then
+			eerror "display $KIVORA_DISPLAY did not come up"
+			# OpenRC marks the service stopped without stopping its supervisor: a
+			# later start would find Xvfb running and fail.
+			stop_supervisor
+			return 1
+		fi
+		sleep 0.2
+	done
+}
+
+stop_supervisor() {
+	local pidfile="/run/supervise-$RC_SVCNAME.pid" pid
+	pid=$(cat "$pidfile" 2>/dev/null) || return 0
+	kill "$pid" 2>/dev/null || return 0
+	for _ in $(seq 50); do
+		kill -0 "$pid" 2>/dev/null || return 0
 		sleep 0.1
 	done
+	kill -9 "$pid" 2>/dev/null
+	rm -f "$pidfile"
 }
