@@ -15,7 +15,7 @@ over SSH. You can watch the desktop live and take over at any time.
 > **Status:** early development, first public release. Claude Code on a laptop
 > drives the VM through the MCP server (web research, forms, PDFs, shell, files,
 > credentials) while the human watches and can take over, with backups, recovery,
-> a 30-scenario reliability suite at 100 % and a published
+> a reliability suite of complete workflows and a published
 > [benchmark](docs/benchmark.md).
 
 ## How it works
@@ -25,8 +25,8 @@ Laptop                              Server (Linux x86_64, KVM)
 ┌──────────────────────┐            ┌──────────────────────────────────────┐
 │ Claude Code          │── SSH ────▶│ VM "kivoradesk" (Alpine Linux)       │
 │  └ MCP client (stdio)│            │  ├ MCP server (kivora-mcp)           │
-│ Browser: live view   │── private ▶│  ├ Xvfb + Openbox, 1280x800          │
-└──────────────────────┘   network  │  ├ Chromium, persistent profile      │
+│ Browser: live view   │── SSH ────▶│  ├ Xvfb + Openbox, 1280x800          │
+└──────────────────────┘   tunnel   │  ├ Chromium, persistent profile      │
                                     │  ├ /workspace (durable files)        │
                                     │  └ VNC + CDP on localhost only       │
                                     └──────────────────────────────────────┘
@@ -44,13 +44,15 @@ Laptop                              Server (Linux x86_64, KVM)
 ## Install
 
 **The server** hosts the VM. It needs Linux on x86_64 with KVM (a cloud server must
-expose it), Docker with Compose, 2 vCPU, 4 GiB of memory for the VM and up to 32 GiB
-of disk, plus the backups. Tested on Ubuntu 24.04, Debian 13 and Fedora 44 with SELinux
-enforcing, with their own Docker packages. macOS, Windows, FreeBSD and ARM cannot host
-the VM for now.
+expose it), Docker Engine 25 or later with Compose v2, 2 vCPU, 4 GiB of memory for the
+VM and up to 32 GiB of disk, plus the backups. Tested on Ubuntu 24.04, Debian 13 and
+Fedora 44 with SELinux enforcing, with their own Docker packages, the oldest being
+Docker 26.1 and Compose 2.26. Not tested yet: a cloud server and rootless Docker.
+macOS, Windows, FreeBSD and ARM cannot host the VM for now.
 
-**Your laptop** drives it. It needs OpenSSH and an MCP client such as Claude Code,
-on any system. It can also be the server itself.
+**Your laptop** drives it. It needs OpenSSH and an MCP client such as Claude Code. The
+steps below were tested from Linux, not yet from macOS or Windows. It can also be the
+server itself.
 
 ### On the server
 
@@ -124,6 +126,10 @@ claude mcp add --scope user kivoradesk -- ssh -o ClearAllForwardings=yes -T kivo
 Ask Claude Code, for example, to research a topic on the web and save the sources
 as PDFs in `/workspace`. To watch it, see [Live view](#live-view-from-the-laptop).
 
+The key gives the MCP server, the live view's tunnel and file transfers, and opens no
+shell on the VM. For diagnosis, use `kivora ssh` on the server. `kivora laptops` lists
+the keys and removes one.
+
 ## MCP tools
 
 | Family | Tools |
@@ -136,10 +142,10 @@ as PDFs in `/workspace`. To watch it, see [Live view](#live-view-from-the-laptop
 | Human | `human_request_takeover`, `human_wait_for_control` |
 
 - **Input lock.** Acting tools run only while the agent owns the desktop, one
-  at a time, and report when control moved during the action. Observing tools
-  are refused while the human uses the desktop. Only the human gives control
-  back; the agent can ask for help, which pauses it and shows the reason in the
-  live view.
+  at a time, across MCP sessions too, and report when control moved during the
+  action. Observing tools are refused while the human uses the desktop. Only the
+  human gives control back; the agent can ask for help, which pauses it and shows
+  the reason in the live view.
 - **Privilege separation.** The MCP server runs as `agent`, which owns the
   display and the browser. `shell_run` and `files_*` run as `worker`, which has
   no access to the display, any service of the VM, including SSH on its own
@@ -148,21 +154,32 @@ as PDFs in `/workspace`. To watch it, see [Live view](#live-view-from-the-laptop
   gateway and DevTools to `agent`. Code the agent runs cannot drive the desktop
   behind the lock.
 - **Untrusted content.** Page text, titles, addresses, file names and content,
-  window names and command output are wrapped as untrusted data, in a tag with a
-  random ID that the content cannot close. Screenshots cannot be wrapped. Tools
+  window names, command output and what a server says in an error are wrapped as
+  untrusted data, in a tag with a random ID that the content cannot close. Titles
+  and addresses are cut when they are too long. Screenshots cannot be wrapped. Tools
   declare MCP annotations (read-only, destructive).
 - **Browser tools.** Their scripts run in an isolated world: a page cannot change
   what they read, pretend to be the visible tab or move the numbers of its
-  elements. `browser_download` refuses the addresses of the VM itself.
+  elements. `browser_navigate` refuses loopback addresses and `browser_download` the
+  addresses of the VM itself. They do not reach inside iframes and shadow DOM:
+  `browser_read_page` says how many it skipped, and `secrets_fill` cannot fill a field
+  there. `pdftotext` and `file` are installed to read what `browser_save_pdf` and
+  `browser_download` save.
 - **Shell network.** Shell commands have no network of their own, not even DNS.
   Their only way out is a proxy reaching, over HTTPS, the sites you allow with
   `kivora shell-allow`, and none at first. It logs what it opens and refuses
-  in `/var/log/kivora-proxy.log`. `browser_download` is how files get in. The browser
-  is not limited: the agent can still send to a site what it reads elsewhere.
-- **Shell limits.** Nothing `shell_run` starts outlives the call, even detached
-  (each call has its own PID namespace, which needs unprivileged user namespaces).
-  512 processes, 3 GiB per process and 8 GiB per file at most, low priority, and
-  the first killed when memory runs out.
+  in `/var/log/kivora-proxy.log`, which is rotated. `browser_download` is how files
+  get in. The browser is not limited: the agent can still send to a site what it reads
+  elsewhere.
+- **Shell limits.** Each `shell_run` has its own PID, IPC and mount namespaces, which
+  needs unprivileged user namespaces, with no capability and no way to create more.
+  Nothing it starts outlives the call, even detached: neither processes, shared memory,
+  nor `/tmp`, `/var/tmp` and `/dev/shm`, which are private, small and empty at each call.
+  Keep files in `/workspace`. 512 processes, 3 GiB per process and 8 GiB per file at
+  most, and low priority. There is no quota on `/workspace` as a whole, only a reserve
+  of the data disk for the audit log, the credentials and the browser. A command is the
+  first killed when memory runs out, unless it changes that itself. Cancelling a call
+  stops its command.
 - **Typing.** `browser_type` inserts any text exactly through CDP.
   `computer_type` types ASCII with the keyboard and pastes other characters
   through the clipboard, checking control between chunks.
@@ -170,32 +187,37 @@ as PDFs in `/workspace`. To watch it, see [Live view](#live-view-from-the-laptop
   `/var/lib/kivora-audit/audit-YYYY-MM-DD.jsonl` on the data disk, kept 90 days,
   under an account of its own: the agent's side can add entries, not read, change
   or delete them. A call that could not be logged says so in its result.
-  Passwords, tokens and keys are masked in the logged arguments.
-- **Timeouts and recovery.** Every call has a maximum duration. After a
+  Common forms of passwords, tokens and keys are masked in the logged arguments, as a
+  safety net. A `secrets_fill` entry names the site that received the value.
+- **Timeouts and recovery.** Every call has a maximum duration, waiting for another
+  one included. A page held by a dialog or a loop gives an error within seconds. After a
   Chromium crash, browser tools wait for the service to restart it; without
   Internet they fail at once with the browser's network error.
 - **Credentials.** The human stores credentials with `kivora secret`,
   each bound to the sites where it may be used and to a kind of field. They live
   under a separate account that the browser cannot read. The agent sees names,
   sites and field kinds only; `secrets_fill` checks the page origin and the field
-  and fills it in one step, and keeps it masked on screen. Filled values are
-  removed from the text of every tool result. Screenshots cannot be cleaned: a
-  site that displays a value it received shows it on screen. Once logged in, the
-  agent can still read what the site itself displays.
+  and fills it in one step, and keeps it masked on screen. Stored values and their
+  common encodings are removed from the text of every tool result, as a safety net: a
+  site can still show a value in a form this does not recognize. Screenshots cannot be
+  cleaned: a site that displays a value it received shows it on screen. Once logged in,
+  the agent can still read what the site itself displays.
 - **Browser lockdown.** Chromium policies block local files, browser pages,
   the developer tools, extensions, file dialogs, downloads from the browser and
-  its password manager, for the agent and for the human during a takeover. To
-  change them, edit `/etc/chromium/policies/managed/kivora.json` in the VM.
-  Tools refuse to read anything but web pages. `browser_download` and
+  its password manager, for the agent and for the human during a takeover. They are
+  in `/etc/chromium/policies/managed/kivora.json` in the VM, and Chromium's flags in
+  `KIVORA_BROWSER_FLAGS`, in `/etc/conf.d/kivoradesk`. An update, a restore or a
+  recovery installs these files again: keep your changes, and apply them again with
+  `kivora ssh`. Tools refuse to read anything but web pages. `browser_download` and
   `browser_save_pdf` are the way to get files.
 - **Files to the laptop.** Copy them with `scp kivoradesk:/workspace/<path> .`
   Transfers run as `worker`, in `/workspace`: a link left there cannot lead to the
-  agent's private files. `scp -O`, the old protocol, does not get this protection.
+  agent's private files. `scp -O`, the old protocol, is refused.
 
-## Phase 0 results
+## Input accuracy
 
-Measured inside the VM with `kivora-probe` (Alpine 3.24, Chromium 155,
-2 vCPU, 4 GiB RAM). Each action targets a random point; an oracle page loaded
+Measured on 2026-11-05 inside the VM with `kivora-probe` (Alpine 3.24, 2 vCPU,
+4 GiB RAM, in Docker). Each action targets a random point; an oracle page loaded
 over CDP checks the event type, button and exact screen coordinates.
 
 | Action | Attempts | Success |
@@ -203,17 +225,15 @@ over CDP checks the event type, button and exact screen coordinates.
 | Left click | 1000 | 100 % |
 | Double click, right click, wheel | 100 each | 100 % |
 | ASCII typing, Ctrl+A / Backspace | 100 / 25 | 100 % |
-| Non-ASCII typing via xdotool (é, €, œ) | 100 | ~10 % |
+| Non-ASCII typing via xdotool (é, €, œ) | 100 | 21 % |
 
 The MCP server avoids that limit: `computer_type` pastes non-ASCII text
-through the clipboard (100/100 exact in the end-to-end test) and
-`browser_type` inserts text through CDP.
+through the clipboard and `browser_type` inserts text through CDP.
 
-Resources: see the [benchmark](docs/benchmark.md). In short, with 2 vCPU and
-4 GiB: 880 MiB of system disk, about 570 MiB of memory used at idle and
-870 MiB with three real sites open, CPU near zero at idle, and 13 s from a
-reboot to working MCP tools. A new VM is created and provisioned in under a
-minute.
+Resources: see the [benchmark](docs/benchmark.md). In short, measured on
+2026-11-01 with the former libvirt install, 2 vCPU and 4 GiB: 880 MiB of system
+disk, about 570 MiB of memory used at idle and 870 MiB with three real sites open,
+CPU near zero at idle, and 13 s from a reboot to working MCP tools.
 
 ## Roadmap
 
@@ -266,13 +286,16 @@ kivora doctor                                  # diagnose the VM, its services a
 kivora check-isolation                         # VM reaches the Internet, not private networks
 kivora allow add 192.168.1.20:8080 staging     # let the VM reach one private service
 kivora shell-allow add pypi.org                # let shell commands reach one site
+kivora laptops list                            # the laptops' keys, with their fingerprints
+kivora laptops remove FINGERPRINT              # stop trusting a laptop
 docker compose down                            # shut the VM down, keep everything
 docker compose down -v                         # delete the VM and all its data, backups included
 ```
 
 The VM stops with the container and restarts with Docker (`restart: unless-stopped`):
 it comes back when Docker starts with the server, unless you stopped it yourself.
-Stopping the container shuts the VM down cleanly.
+Stopping the container shuts the VM down cleanly, through its guest agent when SSH
+does not answer.
 
 Settings go in a `.env` file next to `compose.yaml`. Run `docker compose up -d` after
 changing them.
@@ -285,7 +308,9 @@ changing them.
 | `VM_DATA_GB` | 16 | data disk, when it is created |
 | `KIVORA_BIND` | 127.0.0.1 | address of the server where the VM's SSH is published |
 | `KIVORA_SSH_PORT` | 2222 | port of the server where the VM's SSH is published |
-| `KIVORA_BACKUP_KEEP` | 7 | backups kept |
+| `KIVORA_BACKUP_KEEP` | 7 | backups kept, at least 1 |
+| `KIVORA_PUBLIC_ADDRESSES` | | public addresses of the server that are on none of its interfaces, for the VM to refuse them |
+| `KIVORA_VERSION` | this release | version that the image is built with, shown by `kivora doctor` |
 
 **Limits.** Without UDP, video calls in the VM's browser may fail (untested).
 
@@ -295,17 +320,20 @@ Inside the VM:
   `/etc/sysctl.d/kivoradesk.conf` hardens the kernel for local accounts.
 - The desktop runs as the unprivileged `agent` user on display `:1`
   (1280x800). Only processes holding the agent's X cookie can connect.
-- `/home/agent` and `/workspace` live on a separate data disk mounted at
-  `/data`, so rebuilding the system disk keeps files and browser logins.
+- `/home/agent`, `/workspace`, the credentials, the audit log, the laptops' keys and
+  the live view's sessions and input owner live on a separate data disk mounted at
+  `/data`, so rebuilding the system disk keeps them. A reserve of this disk stays out
+  of the worker's reach, so that they keep working when `/workspace` is full.
 - Services are supervised by OpenRC: `kivora-display`, `kivora-wm`,
-  `kivora-browser`, `kivora-vnc` and `kivora-web`.
+  `kivora-browser`, `kivora-vnc`, `kivora-proxy` and `kivora-web`.
 - Chromium runs with `--disable-gpu-shader-disk-cache`: on Alpine, the GPU
   process's sandbox refuses the system call that writes this cache, and a new
   profile then crashes the browser.
-- Chromium DevTools (9222), VNC (5900) and the web gateway (6080) listen on
-  localhost only. Over SSH, the `agent` account may only forward to 6080. Its
-  authorized keys are in `/etc/ssh/authorized_keys/agent`, on the data disk,
-  and it cannot change them: use `kivora add-laptop`.
+- Chromium DevTools (9222), VNC (5900) and the web gateway (680) listen on
+  localhost only. The gateway's port is privileged, so no other account of the VM can
+  take it. The `agent` account's SSH keys only start the MCP server and file transfers,
+  and may only forward to the gateway. They are in `/etc/ssh/authorized_keys/agent`, on
+  the data disk, and it cannot change them: use `kivora add-laptop` and `kivora laptops`.
 
 ### Its network
 
@@ -313,17 +341,21 @@ The VM is attached to no network of the server. Its Ethernet frames end in
 `kivora-net`, a TCP/IP stack in a process of the container, which only opens
 connections to the Internet on its behalf. Nothing inside the VM can lift this.
 
-- **Refused:** 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16,
-  172.16.0.0/12, 192.0.0.0/24, 192.0.2.0/24, 192.168.0.0/16, 198.18.0.0/15,
-  198.51.100.0/24, 203.0.113.0/24, 224.0.0.0/4, 240.0.0.0/4, and the addresses of the
-  container and of the server. A name that resolves to one of them is refused when
-  the VM connects.
-- **IPv4 and TCP only.** No other UDP than DNS on its gateway (10.86.0.1), no ping.
-  The browser falls back from QUIC to TCP.
+- **Refused:** 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 161.26.0.0/16,
+  168.63.129.16, 169.254.0.0/16, 172.16.0.0/12, 192.0.0.0/24, 192.0.2.0/24,
+  192.88.99.0/24, 192.168.0.0/16, 198.18.0.0/15, 198.51.100.0/24, 203.0.113.0/24,
+  224.0.0.0/4, 240.0.0.0/4, and the addresses of the container, of the server and of
+  its router. Its DNS leaves them out of its answers, and a name that resolves to one
+  of them is refused when the VM connects.
+- **IPv4 and TCP only.** No other UDP than DNS on its gateway (10.86.0.1). No ping to
+  the Internet: only the gateway answers one. The browser falls back from QUIC to TCP.
 - **The server's addresses.** From its container, `kivora-net` cannot see a public
-  address of the server. The `host-addresses` service reads them: it runs once at each
-  `up`, with the server's network and no other right, and has no access to the VM's
-  data. After a change of address, run `docker compose up -d`.
+  address of the server. The `host-addresses` service reads those on its interfaces and
+  its default router: it runs once at each `up`, with the server's network and no other
+  right, and has no access to the VM's data. After a change of address, run `docker
+  compose up -d`. If this list cannot be read, the VM's connections are refused. A
+  public address on none of the interfaces, behind NAT as on most cloud servers, must
+  be listed in `KIVORA_PUBLIC_ADDRESSES`.
 - **Exceptions.** `kivora allow add|remove|list` manages the private services the VM
   may reach: an address, optionally a CIDR and a port, over TCP only. They are kept in
   the volume and apply to the next connection.
@@ -334,10 +366,14 @@ router and the address of Docker's gateway, each first tried from the container.
 ### The container
 
 - QEMU and `kivora-net` run as the `kivora-vm` account, without capabilities, QEMU
-  under its seccomp sandbox.
+  under its seccomp sandbox. Memory and processes are limited: what the VM causes must
+  not exhaust the server.
 - The admin commands run as `kivora`. The SSH keys, the backups and their passphrase
   are in a directory of that account: should the VM ever get out of QEMU, they are out
   of its reach.
+- These accounts have the UIDs 64101 and 64102. Docker shares UIDs with the server: an
+  account of the server with the same one could reach their files, so these are out of
+  the range of human accounts.
 - The entrypoint stays root, with SETUID and SETGID only, to start each part under its
   account. The root filesystem is read-only, and `no-new-privileges` is set.
 - The VM's host key is created in the volume before the first boot: the admin commands
@@ -352,8 +388,17 @@ All commands run on the server and keep the data disk (`/home/agent`,
 kivora backup                 # encrypted backup of the data disk
 kivora restore --list         # backups, most recent first
 kivora restore --yes [FILE]   # reset the data (backs up the current data first)
+kivora restore --yes --no-backup [FILE]   # the same, when that backup cannot be made
 kivora recover --yes          # rebuild a broken system around the data
+kivora repair-data --yes      # repair the data disk's filesystem
+kivora resume                 # continue a VM stopped by a full volume
 ```
+
+The install never formats a data disk that holds something. If that disk cannot be
+mounted, or a disk cannot be opened, the container stays up without a working desktop,
+so that `kivora doctor`, `restore`, `recover` and `repair-data` still answer. A restore
+installs what the image brings in the VM again, and brings back the laptops' keys of
+that backup: check them with `kivora laptops list`.
 
 To update:
 
@@ -364,17 +409,29 @@ docker compose up -d --build
 
 When the new image brings something new for the VM, the container upgrades Alpine's
 packages, installs it in the VM, and restarts the VM on a new kernel. It does not back
-up first: run `kivora backup` before. Between two updates,
+up first: run `kivora backup` before. Nothing updates by itself. Between two updates,
 `kivora ssh 'doas apk update && doas apk upgrade --available'` upgrades the packages,
-and `kivora ssh 'doas reboot'` restarts the VM if that brought a new kernel.
+and `kivora ssh 'doas reboot'` restarts the VM if that brought a new kernel. `kivora
+doctor` warns when the VM's packages are behind.
+
+Docker's cache keeps QEMU and OpenSSH as they were when the image was built. For their
+security updates, rebuild it:
+
+```sh
+docker compose build --pull --no-cache
+docker compose up -d
+```
 
 Backups are point-in-time copies taken while the VM runs: QEMU starts the copy with
 the guest filesystem frozen for a moment, then copies in the background. They are
 encrypted with GPG (AES-256), using a passphrase created by the first backup.
 
+A backup checks first that the volume has room for it. Old backups are removed by
+`KIVORA_BACKUP_KEEP`, never during a restore.
+
 Backups and the passphrase live in the volume, so `docker compose down -v` deletes
 them, and so does losing the server. **Copy them elsewhere, the passphrase above all**:
-without it, backups cannot be restored.
+without it, backups cannot be restored. Git ignores these two names:
 
 ```sh
 docker compose cp kivoradesk:/var/lib/kivoradesk/admin/backups ./backups
@@ -404,15 +461,16 @@ kivora secret delete github-password
 
 A credential goes into password fields only. With `--field text`, it also goes
 into login, email and one-time code fields, which sites may display: keep that
-for values that are not really secret, such as a login name. Credentials stored
-by an older version count as password credentials: store a login name again with
-`--field text`.
+for values that are not really secret, such as a login name. A site is a scheme, a
+host and an optional port, with no wildcard. A value is stored as typed, or refused if
+it is not valid UTF-8 or longer than 64 KiB.
 
 Values are stored in clear in the VM, on the data disk, readable only by the
 `kivora-vault` account, and included in the encrypted backups of the data disk.
 The MCP server asks that account for one value at a time, for the page it is
-about to fill. This keeps them from the model and the browser's pages, not from
-code running as the desktop account, which could ask for them too.
+about to fill, and to clean the text of its results. This keeps them from the model
+and the browser's pages, not from code running as the desktop account, which could
+ask for them too. Neither the worker's commands nor a laptop's key run as that account.
 
 ## Live view from the laptop
 
@@ -431,19 +489,22 @@ On the server, get a sign-in URL and open it in the laptop's browser:
 
 ```sh
 kivora web-url            # works once, for 5 minutes
-kivora web-url --rotate   # also signs out every browser
+kivora web-url --rotate   # also signs out every browser and cuts their connections
+kivora web-url --port N   # the link for a tunnel on another local port
 ```
 
-The input owner survives a restart of the gateway or of the VM: if the agent did
-not own the desktop, it stays paused until you hand control back.
+The input owner survives a restart of the gateway or of the VM and `kivora recover`:
+if the agent did not own the desktop, it stays paused until you hand control back.
 
 The link gives the browser a session of 30 days, in a strict same-site cookie, and
-is of no use after that. On the VM, sessions are only stored as hashes. The gateway
-also rejects non-loopback `Host` headers and cross-origin control requests.
+is of no use after that. When the session ends, the page says so and how to sign in
+again. On the VM, sessions are only stored as hashes. The gateway also rejects
+non-loopback `Host` headers and cross-origin control requests.
 
 `kivora.localhost` keeps the cookie away from the other services of the laptop on
-`localhost`. If your browser does not resolve it (Safari may not), add
-`127.0.0.1 kivora.localhost` to `/etc/hosts`.
+`localhost`. It still goes to other ports of that name: keep it for KivoraDesk. If your
+browser does not resolve it (Safari may not), add `127.0.0.1 kivora.localhost` to
+`/etc/hosts`.
 
 ## Scenario suite
 
@@ -463,7 +524,8 @@ reasoning:
 | Persistence and faults | login kept across a browser restart, credentials, Chromium crash, Internet loss |
 
 Run it on the server, in this directory, with the server set up as a
-[laptop](#on-your-laptop) and the live view tunnel open:
+[laptop](#on-your-laptop) and the live view tunnel open. Building it needs Go 1.27.3,
+which the install does not:
 
 ```sh
 ssh -N kivoradesk &
@@ -473,7 +535,7 @@ bin/kivora-scenarios -mcp "ssh -o ClearAllForwardings=yes -T kivoradesk /usr/loc
   -admin "docker compose exec -T kivoradesk kivora" -runs 10
 ```
 
-Result on 2026-11-05 (Alpine 3.24, Chromium 155, 2 vCPU, 4 GiB, in Docker): **300/300
+Result on 2026-11-05 (Alpine 3.24, 2 vCPU, 4 GiB, in Docker): **300/300
 runs passed (100 %)**, 10 runs per scenario. Without Internet, navigation
 fails with an explicit error, at once or after its 45-second timeout.
 
@@ -482,7 +544,7 @@ fails with an explicit error, at once or after its 45-second timeout.
 `kivora-bench` reboots the VM and measures boot time, disk use, memory by
 component, idle CPU, the latency of the main tools and memory with real sites
 open. `-compare` shows the change between two runs, to judge an optimization.
-Results and method: [docs/benchmark.md](docs/benchmark.md).
+Results and method: [docs/benchmark.md](docs/benchmark.md). Building it needs Go 1.27.3.
 
 ```sh
 go build -o bin/kivora-bench ./cmd/kivora-bench
@@ -493,7 +555,7 @@ bin/kivora-bench -compare before.json after.json
 
 ## Tests
 
-Unit tests run anywhere: `go test ./...`.
+The tests and the tools below need Go 1.27.3. Unit tests run on Linux: `go test ./...`.
 
 Integration tests run against the VM, on the server, with the server set up as a
 [laptop](#on-your-laptop) and the live view tunnel open (`ssh -N kivoradesk`):
@@ -519,8 +581,11 @@ reach the model.
 
 ```sh
 CGO_ENABLED=0 go build -o bin/kivora-probe ./cmd/kivora-probe
-docker compose exec -T kivoradesk kivora ssh 'cat > /tmp/kivora-probe && chmod 755 /tmp/kivora-probe' < bin/kivora-probe
-docker compose exec -T kivoradesk kivora ssh 'doas -u agent env DISPLAY=:1 /tmp/kivora-probe -n 1000'
+KIVORA=(docker compose exec -T kivoradesk kivora)
+dir=$("${KIVORA[@]}" ssh 'mktemp -d')
+"${KIVORA[@]}" ssh "cat > $dir/kivora-probe && chmod 755 $dir $dir/kivora-probe" < bin/kivora-probe
+"${KIVORA[@]}" ssh "doas -u agent env DISPLAY=:1 $dir/kivora-probe -n 1000"
+"${KIVORA[@]}" ssh "rm -rf $dir"
 ```
 
 Run `kivora-probe -h` for options (`-seed` for reproducible runs, `-json`).
@@ -539,7 +604,7 @@ their own authorized account.
 
 ## License
 
-Apache-2.0 — see [LICENSE](LICENSE).
+Copyright 2026 Bruce Rosier. Apache-2.0 — see [LICENSE](LICENSE).
 
 Kivo, the marmot in `docs/assets/`, is the project mascot and is covered by
 the same license.
