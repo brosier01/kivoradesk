@@ -7,6 +7,10 @@
 STATE=/var/lib/kivoradesk
 ADMIN_DIR=$STATE/admin
 VM_DIR=$STATE/vm
+# What these commands hand to the VM's side: they alone write here. They never write
+# in the VM's directory, nor follow a path in it: should the VM get out of QEMU, it
+# could leave a link there to their keys or their backups.
+SHARED_DIR=$STATE/shared
 HOST_ADDRESSES=/var/lib/kivoradesk-host/addresses
 KEY=$ADMIN_DIR/id_ed25519
 HOST_KEY=$ADMIN_DIR/vm_host_ed25519
@@ -14,12 +18,16 @@ KNOWN_HOSTS=$ADMIN_DIR/known_hosts
 PASSPHRASE=$ADMIN_DIR/backup.passphrase
 BACKUPS=$ADMIN_DIR/backups
 PROVISIONED=$ADMIN_DIR/provisioned
-ALLOWLIST=$VM_DIR/allowlist
+ALLOWLIST=$SHARED_DIR/allowlist
 READY=/tmp/kivora-ready
+DEGRADED=/tmp/kivora-degraded
 ADMIN=kivora
 AGENT=agent
 SSH_PORT=2222
+# The live view: on the laptop's side of the tunnel, and in the VM.
 WEB_PORT=6080
+GUEST_WEB_PORT=680
+INSTALL_TIMEOUT=1500
 GUEST_IP=10.86.0.2
 GATEWAY_IP=10.86.0.1
 
@@ -44,10 +52,9 @@ die() {
 # The VM's host key is created in the volume before its first boot, so it is known
 # from the start and survives a rebuild of the system. These commands run root
 # commands in the VM: another key is refused.
-admin_ssh() {
-	ssh -p "$SSH_PORT" -i "$KEY" -F /dev/null -o UserKnownHostsFile="$KNOWN_HOSTS" -o StrictHostKeyChecking=yes \
-		-o BatchMode=yes -o LogLevel=ERROR -o ConnectTimeout=5 "$ADMIN@127.0.0.1" "$@"
-}
+SSH_OPTIONS=(-p "$SSH_PORT" -i "$KEY" -F /dev/null -o UserKnownHostsFile="$KNOWN_HOSTS" -o StrictHostKeyChecking=yes
+	-o LogLevel=ERROR -o ServerAliveInterval=15 -o ServerAliveCountMax=4)
+admin_ssh() { ssh "${SSH_OPTIONS[@]}" -o BatchMode=yes -o ConnectTimeout=5 "$ADMIN@127.0.0.1" "$@"; }
 
 vmctl() { kivora-vmctl -qmp "$VM_DIR/qmp.sock" -qga "$VM_DIR/qga.sock" "$@"; }
 
@@ -91,12 +98,12 @@ seed() {
 		    addresses: [$GUEST_IP/24]
 		    gateway4: $GATEWAY_IP
 	EOF
-	# In the VM's directory, which only QEMU and this account can enter: QEMU, the
-	# only reader, holds this key anyway through the disk it boots.
-	xorriso -as mkisofs -quiet -output "$VM_DIR/seed.part" -volid cidata -joliet -rock \
+	# Readable by QEMU, the only reader, which holds this key anyway through the disk
+	# it boots.
+	xorriso -as mkisofs -quiet -output "$SHARED_DIR/seed.part" -volid cidata -joliet -rock \
 		"$work/user-data" "$work/meta-data" "$work/network-config" 2>/dev/null
-	chmod 644 "$VM_DIR/seed.part"
-	mv "$VM_DIR/seed.part" "$VM_DIR/seed.iso"
+	chmod 640 "$SHARED_DIR/seed.part"
+	mv "$SHARED_DIR/seed.part" "$SHARED_DIR/seed.iso"
 	rm -f "$PROVISIONED"
 }
 
@@ -118,10 +125,9 @@ install_guest() {
 
 	want=$(cat /opt/kivoradesk/guest.sum)
 	[[ $want != "$(cat "$PROVISIONED" 2>/dev/null || true)" ]] || return 0
-	if ((!first_boot)); then
-		log "upgrading the Alpine packages"
-		admin_ssh 'doas apk update -q && doas apk upgrade -q --available'
-	fi
+	# A new VM is as old as its image, and its browser reads the web from the start.
+	log "upgrading the Alpine packages"
+	admin_ssh 'doas apk update -q && doas apk upgrade -q --available'
 	log "installing KivoraDesk in the VM"
 	tar -C /opt/kivoradesk/guest -cf - . | admin_ssh '
 		set -e
@@ -154,13 +160,22 @@ authorize_key() {
 
 add_laptop() {
 	local usage='usage: kivora add-laptop "ssh-ed25519 AAAA... laptop" [SERVER_ADDRESS]'
-	local key=${1:-} address=${2:-127.0.0.1}
+	local key=${1:-} address=${2:-} bind=${KIVORA_BIND:-127.0.0.1}
 	[[ $# -le 2 && $key != *$'\n'* ]] || die "$usage"
 	[[ $key == ssh-* || $key == ecdsa-* || $key == sk-* ]] || die "$usage"
 	printf '%s\n' "$key" | ssh-keygen -l -f - >/dev/null 2>&1 || die "this is not a valid public key"
+	bind=${bind//[\[\]]/}
+	if [[ -z $address ]]; then
+		# Where the port is published, unless that means every address.
+		address=$bind
+		if [[ $bind == 0.0.0.0 || $bind == :: ]]; then
+			address=127.0.0.1
+			log "warning: the port is published on every address: give the one the laptop reaches, as a second argument"
+		fi
+	fi
 	[[ $address =~ ^[A-Za-z0-9.:-]+$ ]] || die "invalid address: $address"
 	authorize_key "$key"
-	if [[ ${KIVORA_BIND:-127.0.0.1} == 127.* && $address != 127.* && $address != localhost ]]; then
+	if [[ $bind == 127.* && $address != 127.* && $address != localhost ]]; then
 		log "warning: the port is only published on this server: set KIVORA_BIND in .env (see the README), or add a ProxyJump"
 	fi
 	log "key authorized. Now run this on the laptop:"
@@ -174,7 +189,7 @@ add_laptop() {
 		    Port ${KIVORA_SSH_PORT:-$SSH_PORT}
 		    User $AGENT
 		    HostKeyAlias kivoradesk
-		    LocalForward $WEB_PORT 127.0.0.1:$WEB_PORT
+		    LocalForward $WEB_PORT 127.0.0.1:$GUEST_WEB_PORT
 		    ServerAliveInterval 30
 		CONFIG
 		echo 'kivoradesk $(cut -d' ' -f1,2 "$HOST_KEY.pub")' >>~/.ssh/known_hosts
@@ -182,17 +197,66 @@ add_laptop() {
 }
 
 web_url() {
-	case ${1:-} in
-	"") ;;
-	--rotate)
+	local usage="usage: kivora web-url [--rotate] [--port LAPTOP_PORT]" port=$WEB_PORT rotate=0 code
+	while (($#)); do
+		case $1 in
+		--rotate)
+			rotate=1
+			shift
+			;;
+		--port)
+			[[ ${2:-} =~ ^[1-9][0-9]{0,4}$ ]] && ((${2:-} <= 65535)) || die "$usage"
+			port=$2
+			shift 2
+			;;
+		*) die "$usage" ;;
+		esac
+	done
+	if ((rotate)); then
 		admin_ssh 'doas -u kivora-web /usr/local/bin/kivora-web sign-out' || die "could not sign out the browsers"
 		log "every browser must sign in again"
-		;;
-	*) die "usage: kivora web-url [--rotate]" ;;
-	esac
-	local code
+	fi
 	code=$(admin_ssh 'doas -u kivora-web /usr/local/bin/kivora-web login-code') || die "could not get a sign-in code"
-	echo "http://kivora.localhost:$WEB_PORT/login?code=$code"
+	echo "http://kivora.localhost:$port/login?code=$code"
+}
+
+# The keys of the laptops, by the fingerprint ssh-keygen -l gives. A key removed
+# also cuts every open connection, or a stolen laptop would keep its own.
+laptops() {
+	local usage="usage: kivora laptops list | remove SHA256:FINGERPRINT"
+	local keys=/etc/ssh/authorized_keys/$AGENT line target found=0
+	local -a kept=()
+	case ${1:-} in
+	list)
+		[[ $# -eq 1 ]] || die "$usage"
+		while IFS= read -r line; do
+			[[ -z $line ]] || printf '%s\n' "$line" | ssh-keygen -l -f - || true
+		done < <(admin_ssh "doas cat $keys")
+		;;
+	remove)
+		[[ $# -eq 2 ]] || die "$usage"
+		target=$2
+		while IFS= read -r line; do
+			[[ -n $line ]] || continue
+			if [[ $(printf '%s\n' "$line" | ssh-keygen -l -f - 2>/dev/null | cut -d' ' -f2) == "$target" ]]; then
+				found=1
+			else
+				kept+=("$line")
+			fi
+		done < <(admin_ssh "doas cat $keys")
+		((found)) || die "$target is not among the laptop keys: kivora laptops list"
+		if ((${#kept[@]})); then printf '%s\n' "${kept[@]}"; fi | admin_ssh "doas sh -c '
+			set -e
+			cat >$keys.new
+			chown root:$AGENT $keys.new
+			chmod 640 $keys.new
+			mv $keys.new $keys
+			pkill -u $AGENT -x sshd-session || true
+		'"
+		log "removed $target; open connections of the laptops were cut"
+		;;
+	*) die "$usage" ;;
+	esac
 }
 
 # Credentials the agent may fill into web pages without seeing them. Each is bound
@@ -212,7 +276,7 @@ secret() {
 		fi
 		[[ $# -ge 2 ]] || die "$usage"
 		# read fails at end of input without a final newline, value read or not.
-		read -rsp "Value for $1 (not shown): " value || true
+		IFS= read -rsp "Value for $1 (not shown): " value || true
 		[[ -t 0 ]] && echo >&2
 		[[ -n $value ]] || die "empty value"
 		printf '%s' "$value" | vault set "${field[@]}" "$@"
@@ -257,13 +321,42 @@ shell_allow() {
 	esac
 }
 
+# As strict as what kivora-net reads: an entry it ignored would only be told to the
+# human through the container's logs.
 valid_allow_entry() {
-	[[ $1 =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})(/([0-9]|[12][0-9]|3[0-2]))?(:([0-9]{1,5}))?$ ]] || return 1
+	local n='(0|[1-9][0-9]{0,2})'
+	[[ $1 =~ ^$n\.$n\.$n\.$n(/([0-9]|[12][0-9]|3[0-2]))?(:([1-9][0-9]{0,4}))?$ ]] || return 1
 	local i
 	for i in 1 2 3 4; do
-		((10#${BASH_REMATCH[i]} <= 255)) || return 1
+		((BASH_REMATCH[i] <= 255)) || return 1
 	done
-	[[ -z ${BASH_REMATCH[8]} ]] || ((10#${BASH_REMATCH[8]} >= 1 && 10#${BASH_REMATCH[8]} <= 65535))
+	[[ -z ${BASH_REMATCH[8]} ]] || ((BASH_REMATCH[8] <= 65535))
+}
+
+ip_number() {
+	local IFS=.
+	# shellcheck disable=SC2086
+	set -- $1
+	echo $((($1 << 24) | ($2 << 16) | ($3 << 8) | $4))
+}
+
+# An entry goes before the addresses of this server: a network can open it unnoticed.
+warn_about_network() {
+	local entry=${1%%:*} bits addr kind mask network
+	[[ $entry == */* ]] || return 0
+	bits=${entry#*/}
+	if ((bits == 0)); then
+		log "warning: this opens every address to the VM: private networks, this server, a cloud's metadata"
+		return 0
+	fi
+	[[ -f $HOST_ADDRESSES ]] || return 0
+	mask=$((0xffffffff << (32 - bits) & 0xffffffff))
+	network=$(($(ip_number "${entry%/*}") & mask))
+	while read -r addr kind; do
+		if [[ $kind == address ]] && ((($(ip_number "$addr") & mask) == network)); then
+			log "warning: this network holds $addr, an address of this server: the VM reaches its services"
+		fi
+	done <"$HOST_ADDRESSES"
 }
 
 # The private services the VM may reach despite its isolation, over TCP. Without a
@@ -288,6 +381,7 @@ allow() {
 		chmod 640 "$ALLOWLIST.new"
 		mv "$ALLOWLIST.new" "$ALLOWLIST"
 		log "the VM may now reach $entry"
+		warn_about_network "$entry"
 		;;
 	remove)
 		valid_allow_entry "$entry" || die "$usage"
@@ -311,7 +405,13 @@ doctor() {
 		failed=1
 	}
 	local state
+	ok "container $(kivora-net -version)"
+	[[ ! -f $DEGRADED ]] || fail "$(cat "$DEGRADED")"
 	state=$(vmctl status 2>/dev/null || true)
+	if [[ $state == io-error ]]; then
+		fail "VM is stopped on a disk error: the volume is probably full. Free some space, then: kivora resume"
+		return 1
+	fi
 	if [[ $state != running ]]; then
 		fail "VM is ${state:-not answering (or a backup is running: QEMU takes one client)}"
 		return 1
@@ -320,7 +420,7 @@ doctor() {
 	if [[ -f $HOST_ADDRESSES ]]; then
 		ok "the VM's network knows $(grep -c ' address$' "$HOST_ADDRESSES" || true) address(es) of this server"
 	else
-		warn "addresses of this server unknown: if it has a public one, the VM can reach it (run docker compose up)"
+		fail "addresses of this server unknown: the VM only reaches its allowed services (run docker compose up)"
 	fi
 	if vmctl agent 2>/dev/null; then
 		ok "guest agent answers (consistent backups available)"
@@ -346,6 +446,7 @@ doctor() {
 # not count as blocked. The list of allowed services is reported, not checked.
 check_isolation() {
 	local failed=0 targets=() always=() target host port router="" gateway="" addr kind
+	local -A checked=()
 	reachable_from_container() { { timeout 2 bash -c "</dev/tcp/$1/$2"; } 2>/dev/null; }
 	reachable_from_vm() { admin_ssh "nc -z -w2 $1 $2" 2>/dev/null; }
 
@@ -364,6 +465,8 @@ check_isolation() {
 		done <"$HOST_ADDRESSES"
 	fi
 	for target in "${targets[@]}"; do
+		[[ -z ${checked[$target]:-} ]] || continue
+		checked[$target]=1
 		host=${target%:*} port=${target#*:}
 		if [[ -f $ALLOWLIST ]] && awk -v a="$host" -v b="$target" '$1 == a || $1 == b { found = 1 } END { exit !found }' "$ALLOWLIST"; then
 			printf '%-8s %s (in the allowlist)\n' allowed "$target"
@@ -416,25 +519,32 @@ new_backup_path() {
 	printf '%s\n' "$out"
 }
 
-# The caller holds the lock.
+# The caller holds the lock. Backups of the moment before a restore or a repair do
+# not push older ones out: those may be the ones still good.
 backup_now() {
+	local rotate=${1:-rotate} keep=${KIVORA_BACKUP_KEEP:-7}
+	[[ $rotate != rotate || $keep =~ ^[1-9][0-9]*$ ]] || die "KIVORA_BACKUP_KEEP must be a number from 1 up, not: $keep"
+	local out copy size used free needed
+	read -r size used < <(vmctl size data) || true
+	[[ -n ${size:-} ]] || die "could not read the size of the data disk: does the VM run?"
+	# The copy, then its encrypted version, at most what the disk takes now. A volume
+	# that fills up stops the VM.
+	free=$(($(df -Pk "$ADMIN_DIR" | awk 'NR == 2 { print $4 }') * 1024))
+	needed=$((2 * used + (512 << 20)))
+	((free >= needed)) || die "not enough space on the volume for a backup: $((needed >> 20)) MiB needed, $((free >> 20)) MiB free"
 	if [[ ! -f $PASSPHRASE ]]; then
 		head -c 32 /dev/urandom | base64 >"$PASSPHRASE"
 		log "created the passphrase of the backups: copy it elsewhere, they cannot be restored without it"
 	fi
 	mkdir -p "$BACKUPS"
-	local out copy size old
 	out=$(new_backup_path)
-	copy=$VM_DIR/backup.qcow2
+	copy=$SHARED_DIR/backup.qcow2
 	cleanup_paths+=("$copy" "$out.part")
 	gpg_home
 
-	# Only the disk's line starts there: those of the file under it are indented.
-	size=$(qemu-img info -U "$VM_DIR/data.qcow2" | sed -n 's/^virtual size: .*(\([0-9]*\) bytes)$/\1/p')
-	[[ -n $size ]] || die "could not read the size of the data disk"
 	rm -f "$copy"
 	qemu-img create -q -f qcow2 "$copy" "$size"
-	chmod 666 "$copy" # QEMU writes it, in a directory this account shares with QEMU only
+	chmod 660 "$copy" # QEMU writes it
 	log "copying the data disk"
 	vmctl backup data /data "$copy"
 	log "encrypting into $out"
@@ -444,28 +554,45 @@ backup_now() {
 	mv "$out.part" "$out"
 	rm -f "$copy"
 
-	mapfile -t old < <(list_backups | tail -n +$((${KIVORA_BACKUP_KEEP:-7} + 1)))
-	((${#old[@]} == 0)) || {
-		rm -f -- "${old[@]}"
-		log "removed ${#old[@]} old backup(s)"
-	}
+	if [[ $rotate == rotate ]]; then
+		local -a old
+		mapfile -t old < <(list_backups | grep -vxF "$out" | tail -n +"$keep")
+		((${#old[@]} == 0)) || {
+			rm -f -- "${old[@]}"
+			log "removed ${#old[@]} old backup(s)"
+		}
+	fi
 	log "backup done: $out ($(du -h "$out" | cut -f1))"
 }
 
-# Stop the VM after a request to the entrypoint, and wait for it to come back.
+# Over SSH, or by what needs no network. An error says nothing: SSH often ends with
+# the VM.
+shut_down() {
+	admin_ssh 'doas poweroff' >/dev/null 2>&1 || vmctl shutdown >/dev/null 2>&1 || true
+}
+
+requests_pending() {
+	[[ -e $SHARED_DIR/data.restore.qcow2 || -e $SHARED_DIR/recover || -e $SHARED_DIR/restart ]]
+}
+
+# Stop the VM after a request to the entrypoint, and wait for it to come back. The
+# entrypoint removes the request before it starts the VM again.
 restart_vm() {
-	admin_ssh 'doas poweroff' >/dev/null 2>&1 || true
+	shut_down
 	local i
 	for i in $(seq 60); do
-		[[ -f $READY ]] || break
+		requests_pending || break
 		sleep 1
 	done
-	if [[ -f $READY ]]; then
+	if requests_pending; then
 		log "the VM does not stop: forcing it"
 		vmctl quit || true
 	fi
-	for i in $(seq 300); do
+	for i in $(seq $((INSTALL_TIMEOUT + 300))); do
 		[[ ! -f $READY ]] || return 0
+		if ! requests_pending && [[ -f $DEGRADED ]]; then
+			die "the VM did not come back: $(cat "$DEGRADED")"
+		fi
 		sleep 1
 	done
 	die "the VM did not come back: see docker compose logs"
@@ -476,9 +603,21 @@ restore() {
 		list_backups || log "no backup"
 		return 0
 	fi
-	[[ ${1:-} == --yes ]] || die "this replaces /home/agent and /workspace in the VM; re-run with --yes [BACKUP_FILE]"
+	local yes=0 backup_first=1 file=""
+	while (($#)); do
+		case $1 in
+		--yes) yes=1 ;;
+		--no-backup) backup_first=0 ;;
+		-*) die "usage: kivora restore --list | --yes [--no-backup] [FILE]" ;;
+		*)
+			[[ -z $file ]] || die "usage: kivora restore --list | --yes [--no-backup] [FILE]"
+			file=$1
+			;;
+		esac
+		shift
+	done
+	((yes)) || die "this replaces /home/agent and /workspace in the VM; re-run with --yes [--no-backup] [BACKUP_FILE]"
 	lock
-	local file=${2:-}
 	if [[ -z $file ]]; then
 		file=$(list_backups | head -n1 || true)
 	elif [[ $file != /* ]]; then
@@ -499,24 +638,103 @@ restore() {
 	info=$(qemu-img info -f qcow2 --output=json "$work/data.qcow2")
 	[[ $info != *backing-filename* && $info != *data-file* ]] || die "the backup refers to another file: refusing it"
 
-	log "backing up the current data first"
-	backup_now
-	chmod 666 "$work/data.qcow2" # QEMU opens it, see backup_now
-	mv "$work/data.qcow2" "$VM_DIR/data.restore.qcow2"
+	if ((backup_first)); then
+		log "backing up the current data first"
+		"$0" _backup no-rotation 9>&- ||
+			die "the current data could not be backed up: free some space, or re-run with --no-backup to replace them without a copy"
+	fi
+	# QEMU reads it. This disk may be older than the system: the installation runs
+	# again, to bring it up to date.
+	chgrp kivora-vm "$work/data.qcow2"
+	chmod 660 "$work/data.qcow2"
+	rm -f "$PROVISIONED"
+	mv "$work/data.qcow2" "$SHARED_DIR/data.restore.qcow2"
 	log "restarting the VM on the restored data"
 	restart_vm
+	if [[ -e $SHARED_DIR/restore.failed ]]; then
+		rm -f "$SHARED_DIR/restore.failed"
+		die "the restored disk could not be put in place, and the VM runs on its previous data: is the volume full?"
+	fi
 	log "restored $file"
+	log "the laptop keys are now those of the backup: kivora laptops list"
 	doctor >/dev/null || log "warning: kivora doctor reports problems"
+}
+
+# A VM that stopped on a full volume stays stopped once there is space again.
+resume() {
+	[[ $# -eq 0 ]] || usage
+	vmctl cont || die "the VM does not resume"
+	log "the VM runs again: $(vmctl status)"
+}
+
+# From inside the VM, whose SSH works without this disk. It must be unmounted, so
+# the services that use it stop, until the restart.
+repair_data() {
+	local yes=0 backup_first=1
+	while (($#)); do
+		case $1 in
+		--yes) yes=1 ;;
+		--no-backup) backup_first=0 ;;
+		*) die "usage: kivora repair-data --yes [--no-backup]" ;;
+		esac
+		shift
+	done
+	((yes)) || die "this stops the VM's services and repairs its data disk, then restarts it; re-run with --yes [--no-backup]"
+	lock
+	if ((backup_first)); then
+		log "copying the disk as it is first"
+		"$0" _backup no-rotation 9>&- ||
+			die "the disk could not be copied first: free some space, or re-run with --no-backup to repair it without a copy"
+	fi
+	log "repairing the data disk"
+	admin_ssh 'doas sh -s' <<-'SCRIPT' || die "the disk could not be repaired: bring back a backup with kivora restore --yes --no-backup"
+		disk=
+		for serial in /sys/block/vd*/serial; do
+			if [ "$(cat "$serial")" = kivora-data ]; then
+				disk=/dev/$(basename "$(dirname "$serial")")
+			fi
+		done
+		[ -n "$disk" ] || { echo "the data disk is not in the VM" >&2; exit 1; }
+		for service in kivora-web kivora-vnc kivora-browser kivora-wm kivora-display kivora-proxy; do
+			rc-service -q "$service" stop 2>/dev/null
+		done
+		pkill -KILL -u agent 2>/dev/null
+		pkill -KILL -u worker 2>/dev/null
+		sleep 1
+		for dir in $(awk '$1 ~ "^/data/" { print $2 }' /etc/fstab) /data; do
+			if mountpoint -q "$dir"; then
+				umount "$dir" || { echo "$dir is in use" >&2; exit 1; }
+			fi
+		done
+		e2fsck -fy "$disk"
+		code=$?
+		# Below 4, nothing is left to repair. Otherwise, it may be the superblock: its
+		# copies are at these places, by block size.
+		for copy in "32768 4096" "16384 2048" "8193 1024"; do
+			[ "$code" -ge 4 ] || break
+			set -- $copy
+			echo "trying the copy of the superblock at block $1"
+			e2fsck -fy -b "$1" -B "$2" "$disk"
+			code=$?
+		done
+		[ "$code" -lt 4 ]
+	SCRIPT
+	rm -f "$PROVISIONED"
+	: >"$SHARED_DIR/restart"
+	log "restarting the VM on the repaired disk"
+	restart_vm
+	doctor >/dev/null || log "warning: kivora doctor reports problems"
+	log "repaired"
 }
 
 recover() {
 	[[ ${1:-} == --yes ]] || die "this rebuilds the VM's system (data is kept); re-run with --yes"
 	lock
-	: >"$VM_DIR/recover"
+	: >"$SHARED_DIR/recover"
 	log "rebuilding the VM's system"
 	restart_vm
 	doctor
-	log "recovered; browsers must sign in again: kivora web-url"
+	log "recovered"
 }
 
 import_backup() {
@@ -546,16 +764,19 @@ usage() {
 		usage: kivora COMMAND, on the server, through: docker compose exec kivoradesk
 
 		  add-laptop "PUBLIC_KEY" [SERVER_ADDRESS]    authorize a laptop, print its SSH setup
-		  web-url [--rotate]                          sign-in link of the live view
+		  laptops list | remove SHA256:FINGERPRINT    the keys of the laptops
+		  web-url [--rotate] [--port LAPTOP_PORT]     sign-in link of the live view
 		  secret set [--field text] NAME ORIGIN...    store a credential (asks for its value)
 		  secret list | delete NAME
 		  shell-allow add|remove HOST[:PORT] | list   sites the agent's shell may reach
 		  allow add|remove IP[/BITS][:PORT] | list    private services the VM may reach
 		  backup                                      encrypted backup of the data disk
-		  restore --list | --yes [FILE]               reset the data to a backup
+		  restore --list | --yes [--no-backup] [FILE] reset the data to a backup
 		  import-backup < FILE                        bring a backup from elsewhere
 		  import-passphrase [--replace] < FILE        bring its passphrase
 		  recover --yes                               rebuild a broken system, keep the data
+		  repair-data --yes [--no-backup]             repair a damaged data disk
+		  resume                                      restart a VM stopped by a full volume
 		  doctor                                      diagnose the VM and its services
 		  check-isolation                             the VM reaches the Internet, not your network
 		  ssh [COMMAND]                               admin shell in the VM
@@ -568,17 +789,18 @@ command=${1:-}
 case $command in
 ssh)
 	if [[ -t 0 ]]; then
-		ssh -t -p "$SSH_PORT" -i "$KEY" -F /dev/null -o UserKnownHostsFile="$KNOWN_HOSTS" -o StrictHostKeyChecking=yes \
-			-o LogLevel=ERROR "$ADMIN@127.0.0.1" "$@"
+		ssh -t "${SSH_OPTIONS[@]}" "$ADMIN@127.0.0.1" "$@"
 	else
 		admin_ssh "$@"
 	fi
 	;;
 health)
-	# Healthy once installed, so that "docker compose up --wait" means ready.
-	[[ -f $READY ]] && admin_ssh true
+	# Healthy once installed, so that "docker compose up --wait" means ready, and as
+	# long as what the agent needs works.
+	[[ -f $READY ]] && admin_ssh 'mountpoint -q /data && doas sh -c "rc-service kivora-firewall status && rc-service kivora-browser status && rc-service kivora-web status" >/dev/null'
 	;;
 add-laptop) add_laptop "$@" ;;
+laptops) laptops "$@" ;;
 web-url) web_url "$@" ;;
 secret) secret "$@" ;;
 shell-allow) shell_allow "$@" ;;
@@ -595,9 +817,14 @@ import-backup)
 	;;
 import-passphrase) import_passphrase "$@" ;;
 recover) recover "$@" ;;
+repair-data) repair_data "$@" ;;
+resume) resume "$@" ;;
 doctor) doctor ;;
 check-isolation) check_isolation ;;
 _seed) seed ;;
-_install) install_guest ;;
+_install) exec timeout -k 10 "$INSTALL_TIMEOUT" "$0" _install_now ;;
+_install_now) install_guest ;;
+_backup) backup_now "$@" ;;
+_shutdown) shut_down ;;
 *) usage ;;
 esac
