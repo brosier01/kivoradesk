@@ -53,6 +53,9 @@ A way around any of these is a vulnerability.
   `127.0.0.1` by default. Docker's published ports bypass ufw and firewalld: with
   `KIVORA_BIND=0.0.0.0` on a public server, it is open to the Internet, with keys only.
   Prefer a LAN or VPN address.
+  Every connection from the server itself reaches the VM from the same address, and
+  a few are allowed per address: any account of the server can hold them and keep
+  the laptops that go through it out, not the admin commands.
 - **Your laptop.** What runs under your account there can use its SSH key and read the
   live view's session from the browser. With a `ProxyJump` through your own account on
   the server, an agent on the laptop inherits that access. The session's cookie also
