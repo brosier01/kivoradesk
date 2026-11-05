@@ -3,13 +3,16 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"strings"
 	"syscall"
 	"time"
 	"unicode/utf8"
 
+	"github.com/brosier01/kivoradesk/internal/browser"
 	"github.com/brosier01/kivoradesk/internal/control"
 	"github.com/brosier01/kivoradesk/internal/desktop"
+	"github.com/brosier01/kivoradesk/internal/secrets"
 	"github.com/brosier01/kivoradesk/internal/workspace"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -17,6 +20,12 @@ import (
 const (
 	downloadsDir  = "downloads"
 	downloadLimit = 500 << 20
+	// maxWriteContent is the most that files_write takes in one call.
+	maxWriteContent = 64 << 20
+	// maxElementsText bounds the list of elements of browser_read_page.
+	maxElementsText = 128 << 10
+	// maxFileRead is the most that files_read reads.
+	maxFileRead = 1000000
 )
 
 type none struct{}
@@ -61,7 +70,7 @@ func (s *server) registerComputer(srv *mcp.Server) {
 						"(shell_run: du -sh /workspace/* | sort -h | tail), and delete nothing without their confirmation."
 				}
 			}
-			return jsonText(state), nil
+			return untrustedJSON("desktop state", state), nil
 		})
 
 	type clickIn struct {
@@ -134,8 +143,9 @@ func (s *server) registerComputer(srv *mcp.Server) {
 			if amount < 1 || amount > 30 {
 				return nil, fmt.Errorf("amount must be 1 to 30")
 			}
-			if err := s.desk.Scroll(ctx, in.X, in.Y, in.Direction, amount); err != nil {
-				return nil, err
+			done, err := s.whileAgent(ctx, amount, func() error { return s.desk.Scroll(ctx, in.X, in.Y, in.Direction, 1) })
+			if err != nil {
+				return nil, fmt.Errorf("stopped after %d notches: %v", done, err)
 			}
 			return text("Scrolled %s %d at (%d, %d).", in.Direction, amount, in.X, in.Y), nil
 		})
@@ -184,8 +194,9 @@ func (s *server) registerComputer(srv *mcp.Server) {
 			if repeat > 50 {
 				return nil, fmt.Errorf("repeat must be 1 to 50")
 			}
-			if err := s.desk.Key(ctx, in.Keys, repeat); err != nil {
-				return nil, err
+			done, err := s.whileAgent(ctx, repeat, func() error { return s.desk.Key(ctx, in.Keys, 1) })
+			if err != nil {
+				return nil, fmt.Errorf("stopped after %d presses: %v", done, err)
 			}
 			return text("Pressed %s ×%d.", in.Keys, repeat), nil
 		})
@@ -196,7 +207,7 @@ func (s *server) registerComputer(srv *mcp.Server) {
 			if err != nil {
 				return nil, err
 			}
-			return jsonText(wins), nil
+			return untrustedJSON("window list", wins), nil
 		})
 
 	type focusIn struct {
@@ -212,13 +223,13 @@ func (s *server) registerComputer(srv *mcp.Server) {
 }
 
 func (s *server) registerBrowser(srv *mcp.Server) {
-	add(srv, s, observe, &mcp.Tool{Name: "browser_tabs", Description: "List the browser tabs; the one on screen is marked active."},
+	add(srv, s, observe, &mcp.Tool{Name: "browser_tabs", Description: "List the browser tabs. The one on screen comes first and is marked active; a tab opened by another, such as a popup, says which."},
 		func(ctx context.Context, _ none) ([]mcp.Content, error) {
 			tabs, err := s.br.Tabs(ctx)
 			if err != nil {
 				return nil, err
 			}
-			return jsonText(tabs), nil
+			return untrustedJSON("browser tabs", tabs), nil
 		})
 
 	type urlIn struct {
@@ -303,17 +314,29 @@ func (s *server) registerBrowser(srv *mcp.Server) {
 			if maxChars <= 0 {
 				maxChars = 20000
 			}
-			page, err := s.br.ReadPage(ctx, min(maxChars, 100000))
+			limit := min(maxChars, browser.MaxPageText)
+			// The whole text is read and cleaned, then cut: cut at a length the
+			// model chooses, a stored value would no longer be recognized.
+			page, err := s.br.ReadPage(ctx, browser.MaxPageText)
+			if err != nil {
+				return nil, err
+			}
+			pageText, truncated, err := s.cleanThenCut(ctx, page.Text, func(t string) string { return cutRunes(t, limit) })
 			if err != nil {
 				return nil, err
 			}
 			var b strings.Builder
-			fmt.Fprintf(&b, "# %s\n%s\n\n%s\n", page.Title, page.URL, page.Text)
-			if page.Truncated {
-				fmt.Fprintf(&b, "\n[text truncated at %d characters]\n", maxChars)
+			fmt.Fprintf(&b, "# %s\n%s\n\n%s\n", page.Title, page.URL, pageText)
+			if truncated || page.Truncated {
+				fmt.Fprintf(&b, "\n[text truncated at %d characters]\n", limit)
 			}
 			b.WriteString("\n## Interactive elements\n")
-			for _, e := range page.Elements {
+			listed := b.Len()
+			for i, e := range page.Elements {
+				if b.Len()-listed > maxElementsText {
+					fmt.Fprintf(&b, "[%d more elements not listed: the page is too long for this list]\n", len(page.Elements)-i)
+					break
+				}
 				fmt.Fprintf(&b, "[%d] %s", e.ID, e.Tag)
 				if e.Type != "" {
 					fmt.Fprintf(&b, " (%s)", e.Type)
@@ -323,6 +346,12 @@ func (s *server) registerBrowser(srv *mcp.Server) {
 					fmt.Fprintf(&b, " -> %s", e.Href)
 				}
 				b.WriteByte('\n')
+			}
+			if page.MoreElements {
+				fmt.Fprintf(&b, "[the page has more than %d elements: the others have no number]\n", len(page.Elements))
+			}
+			if page.Frames > 0 || page.ShadowRoots > 0 {
+				fmt.Fprintf(&b, "[not read and not numbered: %d iframes and %d shadow roots of this page; use a screenshot and computer_* for what they hold]\n", page.Frames, page.ShadowRoots)
 			}
 			return text("%s", untrusted(page.URL, b.String())), nil
 		})
@@ -336,7 +365,11 @@ func (s *server) registerBrowser(srv *mcp.Server) {
 			if err != nil {
 				return nil, err
 			}
-			return text("Clicked element %d. %s", in.Element, tabText(tab)), nil
+			unchecked := ""
+			if tab.Unchecked {
+				unchecked = "The page changed at once, before the click could be checked to have reached the element: take a screenshot to be sure. "
+			}
+			return text("Clicked element %d. %s%s%s", in.Element, unchecked, switchedNote(tab), tabText(tab)), nil
 		})
 
 	type btypeIn struct {
@@ -352,7 +385,7 @@ func (s *server) registerBrowser(srv *mcp.Server) {
 			if err != nil {
 				return nil, err
 			}
-			return text("Typed %d characters. %s", utf8.RuneCountInString(in.Text), tabText(tab)), nil
+			return text("Typed %d characters. %s%s", utf8.RuneCountInString(in.Text), switchedNote(tab), tabText(tab)), nil
 		})
 
 	type waitIn struct {
@@ -373,10 +406,11 @@ func (s *server) registerBrowser(srv *mcp.Server) {
 	}
 	add(srv, s, act, &mcp.Tool{Name: "browser_save_pdf", Description: "Save the visible page as a PDF in /workspace/downloads."},
 		func(ctx context.Context, in pdfIn) ([]mcp.Content, error) {
-			data, tab, err := s.br.PDF(ctx)
+			body, tab, err := s.br.PDF(ctx)
 			if err != nil {
 				return nil, err
 			}
+			defer body.Close()
 			name := in.Filename
 			if name == "" {
 				name = orDefault(tab.Title, "page")
@@ -384,11 +418,12 @@ func (s *server) registerBrowser(srv *mcp.Server) {
 			if !strings.HasSuffix(strings.ToLower(name), ".pdf") {
 				name += ".pdf"
 			}
-			rel, err := workspace.Create("/workspace", downloadsDir, name, strings.NewReader(string(data)), downloadLimit)
+			counted := &countingReader{r: body}
+			rel, err := workspace.Create("/workspace", downloadsDir, name, counted, downloadLimit)
 			if err != nil {
-				return nil, err
+				return nil, &browser.ThirdPartyError{Message: "could not save the PDF", Detail: err.Error()}
 			}
-			return text("Saved /workspace/%s (%d bytes) from %s.", rel, len(data), tab.URL), nil
+			return text("Saved %s (%d bytes).", untrustedInline(fmt.Sprintf("/workspace/%s from %s", rel, tab.URL)), counted.n), nil
 		})
 
 	type dlIn struct {
@@ -405,9 +440,9 @@ func (s *server) registerBrowser(srv *mcp.Server) {
 			defer body.Close()
 			rel, err := workspace.Create("/workspace", downloadsDir, orDefault(in.Filename, suggested), body, downloadLimit)
 			if err != nil {
-				return nil, err
+				return nil, &browser.ThirdPartyError{Message: "could not save the file", Detail: err.Error()}
 			}
-			return text("Saved /workspace/%s.", rel), nil
+			return text("Saved %s.", untrustedInline("/workspace/"+rel)), nil
 		})
 }
 
@@ -416,8 +451,8 @@ func (s *server) registerShellAndFiles(srv *mcp.Server) {
 		Command        string `json:"command" jsonschema:"shell command run with /bin/sh in /workspace"`
 		TimeoutSeconds int    `json:"timeout_seconds,omitempty" jsonschema:"1 to 600, default 60; the whole process group is killed after it"`
 	}
-	add(srv, s, act, &mcp.Tool{Name: "shell_run",
-		Description: "Run a shell command in the VM as an unprivileged user without access to the screen or browser. Returns the exit code and output (long output keeps its head and tail). Available: busybox, curl, ripgrep, bash."},
+	add(srv, s, work, &mcp.Tool{Name: "shell_run",
+		Description: "Run a shell command in the VM as an unprivileged user without access to the screen or browser. Returns the exit code and output (long output keeps its head and tail). Available: busybox, curl, ripgrep, bash. Nothing it starts outlives the call. It only reaches the sites the human allowed, over HTTPS with curl: use browser_download for files from the web."},
 		func(ctx context.Context, in shellIn) ([]mcp.Content, error) {
 			if strings.TrimSpace(in.Command) == "" {
 				return nil, fmt.Errorf("command is empty")
@@ -443,7 +478,7 @@ func (s *server) registerShellAndFiles(srv *mcp.Server) {
 			if err != nil {
 				return nil, err
 			}
-			return jsonText(entries), nil
+			return untrustedJSON("file list", entries), nil
 		})
 
 	type readIn struct {
@@ -452,15 +487,26 @@ func (s *server) registerShellAndFiles(srv *mcp.Server) {
 	}
 	add(srv, s, observe, &mcp.Tool{Name: "files_read", Description: "Read a text file of /workspace."},
 		func(ctx context.Context, in readIn) ([]mcp.Content, error) {
-			maxBytes := clamp(in.MaxBytes, 100000, 1, 1000000)
-			data, truncated, err := s.work.ReadFile(ctx, in.Path, maxBytes)
+			maxBytes := clamp(in.MaxBytes, 100000, 1, maxFileRead)
+			// As for a page: read all there may be, clean it, then cut it.
+			data, cut, err := s.work.ReadFile(ctx, in.Path, maxFileRead)
 			if err != nil {
 				return nil, err
 			}
-			if !utf8.Valid(data) && !truncated {
+			whole := string(data)
+			if cut {
+				whole = string(withoutCutCharacter(data)) + secrets.CutMark
+			}
+			body, truncated, err := s.cleanThenCut(ctx, whole, func(t string) string {
+				return string(withoutCutCharacter([]byte(cutText(t, maxBytes))))
+			})
+			if err != nil {
+				return nil, err
+			}
+			truncated = truncated || cut
+			if !utf8.ValidString(body) {
 				return nil, fmt.Errorf("%s is not a text file; inspect it with shell_run (e.g. file, pdftotext) or copy it with scp", in.Path)
 			}
-			body := string(data)
 			if truncated {
 				body += fmt.Sprintf("\n[truncated at %d bytes]", maxBytes)
 			}
@@ -471,8 +517,11 @@ func (s *server) registerShellAndFiles(srv *mcp.Server) {
 		Path    string `json:"path" jsonschema:"file inside /workspace; parent directories are created"`
 		Content string `json:"content" jsonschema:"text content; replaces the file"`
 	}
-	add(srv, s, act, &mcp.Tool{Name: "files_write", Description: "Create or replace a text file in /workspace."},
+	add(srv, s, work, &mcp.Tool{Name: "files_write", Description: "Create or replace a text file in /workspace."},
 		func(ctx context.Context, in writeIn) ([]mcp.Content, error) {
+			if len(in.Content) > maxWriteContent {
+				return nil, fmt.Errorf("the content is %d bytes, over the limit of %d for one call: write it in several files, or produce it with shell_run", len(in.Content), maxWriteContent)
+			}
 			if err := s.work.WriteFile(ctx, in.Path, []byte(in.Content)); err != nil {
 				return nil, err
 			}
@@ -482,7 +531,7 @@ func (s *server) registerShellAndFiles(srv *mcp.Server) {
 	type delIn struct {
 		Path string `json:"path" jsonschema:"file or empty directory inside /workspace"`
 	}
-	add(srv, s, act, &mcp.Tool{Name: "files_delete", Description: "Delete a file or an empty directory of /workspace."},
+	add(srv, s, work, &mcp.Tool{Name: "files_delete", Description: "Delete a file or an empty directory of /workspace."},
 		func(ctx context.Context, in delIn) ([]mcp.Content, error) {
 			if err := s.work.Delete(ctx, in.Path); err != nil {
 				return nil, err
@@ -493,9 +542,9 @@ func (s *server) registerShellAndFiles(srv *mcp.Server) {
 
 func (s *server) registerSecrets(srv *mcp.Server) {
 	add(srv, s, observe, &mcp.Tool{Name: "secrets_list",
-		Description: "List the credentials the human stored (names and the sites where each may be used). Values are never shown."},
+		Description: "List the credentials the human stored (names, the sites where each may be used and the kind of field it goes into). Values are never shown."},
 		func(ctx context.Context, _ none) ([]mcp.Content, error) {
-			infos, err := s.vault.List()
+			infos, err := s.vault.List(ctx)
 			if err != nil {
 				return nil, err
 			}
@@ -510,10 +559,14 @@ func (s *server) registerSecrets(srv *mcp.Server) {
 		Element int    `json:"element" jsonschema:"text or password field number from browser_read_page"`
 	}
 	add(srv, s, act, &mcp.Tool{Name: "secrets_fill",
-		Description: "Fill a stored credential into a field of the visible page without revealing it. Refused unless the page is on one of the credential's sites. Submit the form yourself afterwards."},
+		Description: "Fill a stored credential into a field of the visible page without revealing it. Refused unless the page is on one of the credential's sites and the field suits the credential: password fields for \"password\" credentials, also login, email and one-time code fields for \"text\" ones. Submit the form yourself afterwards."},
 		func(ctx context.Context, in fillIn) ([]mcp.Content, error) {
-			tab, err := s.br.FillSecret(ctx, in.Element, func(pageURL string) (string, string, error) {
-				return s.vault.ValueFor(in.Name, pageURL)
+			tab, err := s.br.FillSecret(ctx, in.Element, func(pageURL string) (secrets.Grant, error) {
+				grant, err := s.vault.ValueFor(ctx, in.Name, pageURL)
+				if err == nil {
+					noteAudit(ctx, "origin", grant.Origin)
+				}
+				return grant, err
 			})
 			if err != nil {
 				return nil, err
@@ -571,6 +624,51 @@ func (s *server) screenshot(ctx context.Context, caption string) ([]mcp.Content,
 		caption = fmt.Sprintf("Screenshot %dx%d at %s.", s.desk.Width, s.desk.Height, time.Now().UTC().Format(time.RFC3339))
 	}
 	return []mcp.Content{&mcp.TextContent{Text: caption}, &mcp.ImageContent{Data: png, MIMEType: "image/png"}}, nil
+}
+
+// switchedNote tells the model that what it did changed the tab on screen.
+func switchedNote(tab browser.Tab) string {
+	if tab.Switched {
+		return "That brought another tab or window on screen, where the next tools act. "
+	}
+	return ""
+}
+
+// cutRunes limits a text to n characters.
+func cutRunes(s string, n int) string {
+	for i := range s {
+		if n == 0 {
+			return s[:i]
+		}
+		n--
+	}
+	return s
+}
+
+// withoutCutCharacter drops an incomplete character at the end of data: a read
+// that stops in the middle of one does not make a text binary.
+func withoutCutCharacter(data []byte) []byte {
+	for i := 1; i < utf8.UTFMax && i <= len(data); i++ {
+		if utf8.RuneStart(data[len(data)-i]) {
+			if !utf8.FullRune(data[len(data)-i:]) {
+				return data[:len(data)-i]
+			}
+			break
+		}
+	}
+	return data
+}
+
+// countingReader counts what goes through it.
+type countingReader struct {
+	r io.Reader
+	n int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	return n, err
 }
 
 func orDefault(s, def string) string {

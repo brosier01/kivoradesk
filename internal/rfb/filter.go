@@ -54,9 +54,14 @@ func NewFilter(dst io.Writer, allow func() bool) *Filter {
 
 // Run reads the client stream until it ends or a protocol error occurs.
 func (f *Filter) Run(src io.Reader) error {
-	if err := f.handshake(src); err != nil {
-		return fmt.Errorf("rfb handshake: %w", err)
+	if err := f.Handshake(src); err != nil {
+		return err
 	}
+	return f.Forward(src)
+}
+
+// Forward does the work of Run after Handshake.
+func (f *Filter) Forward(src io.Reader) error {
 	for {
 		msg, input, err := readMessage(src)
 		if err != nil {
@@ -94,13 +99,20 @@ func (f *Filter) Release() error {
 	return nil
 }
 
-// handshake forwards the version, security choice and ClientInit. Only RFB
+// Handshake forwards the version, security choice and ClientInit. Only RFB
 // 3.7/3.8 with security type None is supported: the server is a local x11vnc
 // without password, and the gateway handles authentication itself.
 //
 // Each step is forwarded as soon as it is read: the server answers the
 // version before the client sends its security choice, so batching would
 // deadlock.
+func (f *Filter) Handshake(src io.Reader) error {
+	if err := f.handshake(src); err != nil {
+		return fmt.Errorf("rfb handshake: %w", err)
+	}
+	return nil
+}
+
 func (f *Filter) handshake(src io.Reader) error {
 	version := make([]byte, 12)
 	if _, err := io.ReadFull(src, version); err != nil {
@@ -210,7 +222,7 @@ func readMessage(r io.Reader) (msg []byte, input bool, err error) {
 		err, input = read(5), true
 	case msgClientCutText:
 		if err = read(7); err == nil {
-			n := int32(binary.BigEndian.Uint32(msg[4:]))
+			n := int64(int32(binary.BigEndian.Uint32(msg[4:])))
 			if n < 0 { // extended clipboard
 				n = -n
 			}

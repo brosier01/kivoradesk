@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Build
+        run: go build ./...
+      - name: Format
+        run: test -z "$(gofmt -l cmd internal)" || { gofmt -l cmd internal; exit 1; }
+      - name: Module files
+        run: go mod tidy -diff
+      - name: Vet
+        run: |
+          go vet ./...
+          go vet -tags integration ./...
+      # Ubuntu refuses unprivileged namespaces by default, and the test of the
+      # shell commands' isolation would skip what it is there to check.
+      - name: Allow unprivileged namespaces
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+      - name: Unit tests
+        run: go test -race ./...
+        env:
+          # Out of /tmp, which the isolated commands of the tests replace.
+          GOTMPDIR: ${{ runner.temp }}
+      - name: Known vulnerabilities
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+      - name: Shell scripts parse
+        run: |
+          for script in docker/*.sh; do bash -n "$script"; done
+          sh -n image/alpine/provision.sh
+          sh -n docker/doctor-guest.sh
+      - name: Shell scripts lint
+        run: shellcheck --severity=warning docker/*.sh image/alpine/provision.sh
+      - name: Image
+        run: docker compose build

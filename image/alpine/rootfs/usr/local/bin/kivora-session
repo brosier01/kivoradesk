@@ -1,0 +1,17 @@
+#!/bin/sh
+# What a laptop may run on the agent account, through ForceCommand: the MCP server
+# and file transfers, nothing else. A shell here would reach what the tools keep
+# away from the model: the vault, the desktop behind the input lock, the browser,
+# all out of the audit log. Tunnels (ssh -N) run no command, and do not come here.
+#
+# A subsystem arrives as its configured command: see the sshd configuration.
+case ${SSH_ORIGINAL_COMMAND:-} in
+/usr/local/bin/kivora-mcp)
+	exec /usr/local/bin/kivora-mcp
+	;;
+"/usr/bin/doas -u worker /usr/lib/ssh/sftp-server -d /workspace")
+	exec /usr/bin/doas -u worker /usr/lib/ssh/sftp-server -d /workspace
+	;;
+esac
+echo "kivoradesk: this account only runs the MCP server, file transfers and the live view tunnel" >&2
+exit 1

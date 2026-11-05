@@ -5,6 +5,7 @@
 <meta name="google" content="notranslate">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>KivoraDesk</title>
+<link rel="icon" href="data:,">
 <link rel="stylesheet" href="/ui/style.css">
 <script type="module" src="/ui/app.js"></script>
 </head>
@@ -17,9 +18,17 @@
     <button id="take" type="button">Take control</button>
     <button id="pause" type="button">Pause agent</button>
     <button id="give" type="button">Return to agent</button>
+    <button id="keyboard" type="button" hidden>Keyboard</button>
   </nav>
 </header>
+<div id="error" class="error" role="alert" hidden></div>
 <div id="request" class="request" role="alert" hidden></div>
+<div id="typing" class="typing" hidden>
+  <input id="text" type="text" aria-label="Text to type on the desktop" autocomplete="off" autocapitalize="off" spellcheck="false" enterkeyhint="send">
+  <button id="send" type="button">Send</button>
+  <button id="enter" type="button">Enter</button>
+  <button id="erase" type="button">Erase</button>
+</div>
 <main id="screen"></main>
 </body>
 </html>

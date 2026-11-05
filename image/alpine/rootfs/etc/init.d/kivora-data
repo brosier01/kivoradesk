@@ -1,0 +1,59 @@
+#!/sbin/openrc-run
+# Checks and mounts the data disk, apart from the system's own filesystems: errors
+# on it must not stop the boot, since sshd and the admin commands are what can
+# repair it. Without it, the services that depend on this stay stopped: the browser
+# would start a new profile on the system disk, and the audit log a new file, while
+# the human's data waits on the disk that failed.
+
+description="KivoraDesk data disk"
+
+depend() {
+	need localmount
+	before kivora-firewall kivora-display kivora-web kivora-proxy
+}
+
+# The disk whose virtio serial is kivora-data.
+data_disk() {
+	for serial in /sys/block/vd*/serial; do
+		if [ -f "$serial" ] && [ "$(cat "$serial")" = kivora-data ]; then
+			echo "/dev/$(basename "$(dirname "$serial")")"
+			return
+		fi
+	done
+}
+
+check_disk() {
+	mountpoint -q /data && return 0
+	disk=$(data_disk)
+	if [ -z "$disk" ]; then
+		eerror "The data disk is missing"
+		return 1
+	fi
+	e2fsck -p "$disk" >/dev/null 2>&1
+	# 0: clean. 1: repaired. Anything else needs a human.
+	[ $? -le 1 ]
+}
+
+start() {
+	ebegin "Mounting the KivoraDesk data disk"
+	grep -q ' /data ' /etc/fstab || { eend 0; return 0; }
+	if ! check_disk; then
+		eend 1 "The data disk has errors: run kivora doctor, then kivora repair-data"
+		return 1
+	fi
+	if ! mountpoint -q /data && ! mount /data; then
+		eend 1 "The data disk does not mount: run kivora doctor, then kivora repair-data"
+		return 1
+	fi
+	# The directories that live on it, in the order of fstab.
+	failed=0
+	for dir in $(awk '$1 ~ "^/data/" && $4 ~ /(^|,)bind(,|$)/ { print $2 }' /etc/fstab); do
+		mountpoint -q "$dir" || mount "$dir" || failed=1
+	done
+	eend $failed "Some directories of the data disk did not mount"
+}
+
+stop() {
+	ebegin "Leaving the data disk mounted until the system unmounts everything"
+	eend 0
+}

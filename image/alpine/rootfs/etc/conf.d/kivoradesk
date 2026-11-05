@@ -13,11 +13,18 @@ KIVORA_CDP_PORT="9222"
 
 # Extra Chromium command-line flags. The VM has no GPU: without
 # --disable-gpu, Chromium emulates one in a separate process for nothing
-# (no WebGL either way) and uses about 50 MiB more.
-KIVORA_BROWSER_FLAGS="--disable-gpu"
+# (no WebGL either way) and uses about 50 MiB more. The shader disk cache must
+# stay off: writing it from the sandboxed GPU process calls pwritev2, which the
+# sandbox refuses on Alpine, and Chromium exits after a few such crashes.
+KIVORA_BROWSER_FLAGS="--disable-gpu --disable-gpu-shader-disk-cache"
 
 # VNC port, bound to localhost only. Viewers go through the web gateway.
 KIVORA_VNC_PORT="5900"
 
-# Web gateway port, bound to localhost only; reach it through an SSH tunnel.
-KIVORA_WEB_PORT="6080"
+# Web gateway port, bound to localhost only; reach it through an SSH tunnel. Below
+# 1024, so that only the gateway can listen on it.
+KIVORA_WEB_PORT="680"
+
+# Port of the proxy of the agent's shell commands, bound to localhost only.
+# Also set in /etc/kivoradesk/firewall.nft and internal/worker.
+KIVORA_PROXY_PORT="3128"

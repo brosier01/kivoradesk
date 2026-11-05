@@ -1,7 +1,37 @@
 # KivoraDesk benchmark
 
-Measured on 2026-11-01 with `kivora-bench` (Phase 4). Each change was
-measured on its own, after the previous ones (A/B), then all together.
+## The Docker install
+
+Measured on 2026-11-05 with `kivora-bench`, one run, on an idle server (same host as
+below), from a clean clone of 0.4.0: Chromium 156, 2 vCPU, 4 GiB.
+
+| Measure | Value |
+|---|---:|
+| Reboot to working MCP tools | 13.4 s |
+| Browser ready (uptime) | 4.8 s |
+| System disk | 898 MiB, 321 packages |
+| Memory at idle | 585 MiB |
+| Memory with 3 sites open | 879 MiB |
+| CPU at idle | 0.30 % |
+
+| Tool | p50 ms | p95 ms |
+|---|---:|---:|
+| `computer_get_state` | 9.2 | 13.4 |
+| `computer_screenshot` | 52.4 | 56.9 |
+| `computer_click` | 68.5 | 69.0 |
+| `computer_key` | 49.0 | 49.8 |
+| `computer_type`, ASCII (20 characters) | 271.2 | 273.4 |
+| `computer_type`, accented (20 characters) | 789.8 | 813.8 |
+| `browser_navigate` example.com | 42.4 | 51.3 |
+| `browser_read_page` | 7.6 | 10.4 |
+| `shell_run` `true` | 8.6 | 19.0 |
+| `files_write` + `files_read` | 10.8 | 11.8 |
+
+## How it got there
+
+Measured on 2026-11-01 with `kivora-bench`, on the libvirt install KivoraDesk had
+then. Each change was measured on its own, after the previous ones (A/B), then all
+together.
 
 ## Setup
 
@@ -38,7 +68,6 @@ after the changes.
 | Baseline (0.2.0) | 29.5 s | 12.2 s | 1021 MiB | 453 | 598 MiB | 455 MiB |
 | Boot menu wait 10 s → 1 s | 19.2 s | 11.0 s | 1021 MiB | 453 | 606 MiB | 456 MiB |
 | noVNC web client only, cloud-init removed after first boot | 18.2 s | 9.8 s | 889 MiB | 315 | 594 MiB | 464 MiB |
-| No DHCP conflict probe | 14.2 s | 5.4 s | 889 MiB | 315 | 587 MiB | 457 MiB |
 | Chromium `--disable-gpu` | 11.5 s | 5.4 s | 889 MiB | 315 | 581 MiB | 406 MiB |
 | All, `/tmp` emptied at boot | 13.3 s | 5.1 s | 880 MiB | 315 | 572 MiB | 407 MiB |
 
@@ -49,8 +78,6 @@ after the changes.
 - **cloud-init.** Needed on the first boot only (admin account, SSH keys,
   network configuration). It ran four services at every boot and kept Python
   installed.
-- **DHCP.** The VM's address is reserved for its MAC on the libvirt network;
-  dhcpcd's ARP conflict probe held every service back for 5 s.
 - **GPU.** The VM has no GPU, so Chromium emulated one in a separate
   process, with no WebGL either way. Without it Chromium uses about 50 MiB
   less; Xvfb takes 16 MiB more, as part of the rendering moves there. The
@@ -58,7 +85,9 @@ after the changes.
 
 Reading the steps: each row is a single run. Idle memory varies by about
 ±10 MiB between runs and the reboot time by about ±2 s (the shutdown part),
-so the last row can be slower than the one above it.
+so the last row can be slower than the one above it. The step to the GPU row also
+holds about 4 s from a DHCP setting of the former network: the VM now has a fixed
+address and no DHCP client.
 
 ## Tool latency
 
@@ -97,21 +126,22 @@ the cost of security or of what the agent sees.
 ## Earlier figures
 
 The 0.1.0 notes gave 313 MiB used at idle: that was the "used" column of
-`free`, which leaves out reclaimable kernel memory. The same VM reads about
-350 MiB there today; the benchmark's stricter measure reads about 570 MiB.
+`free`, which leaves out reclaimable kernel memory. On 2026-11-01, the same VM read
+about 350 MiB there; the benchmark's stricter measure read about 570 MiB.
 
 ## Reproduce
 
-On the server, with the VM created and provisioned:
+On the server, with the VM created and provisioned, and Go 1.27.3:
 
 ```sh
 go build -o bin/kivora-bench ./cmd/kivora-bench
 bin/kivora-bench -label before -out before.json
-# apply a change, scripts/vm/provision.sh
+# apply a change, docker compose up -d --build --wait
 bin/kivora-bench -label after -out after.json
 bin/kivora-bench -compare before.json after.json
 ```
 
 `-reboot=false` skips the boot measurement; `-sites` and `-runs` change the
 loaded pages and the number of calls per tool. Extra Chromium flags go in
-`KIVORA_BROWSER_FLAGS` (`/etc/conf.d/kivoradesk` in the VM).
+`KIVORA_BROWSER_FLAGS` (`/etc/conf.d/kivoradesk` in the VM), which an update installs
+again.

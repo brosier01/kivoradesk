@@ -12,7 +12,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -53,11 +52,17 @@ func (d *Desktop) Screenshot(ctx context.Context) ([]byte, error) {
 	if err := os.MkdirAll(d.ShotDir, 0o700); err != nil {
 		return nil, err
 	}
-	path := filepath.Join(d.ShotDir, "screenshot.png")
-	if _, err := d.run(ctx, "scrot", "--overwrite", "--pointer", path); err != nil {
+	// A file per call: observing tools run side by side, here and in other sessions.
+	f, err := os.CreateTemp(d.ShotDir, "screenshot-*.png")
+	if err != nil {
 		return nil, err
 	}
-	return os.ReadFile(path)
+	f.Close()
+	defer os.Remove(f.Name())
+	if _, err := d.run(ctx, "scrot", "--overwrite", "--pointer", f.Name()); err != nil {
+		return nil, err
+	}
+	return os.ReadFile(f.Name())
 }
 
 // Move moves the pointer.
@@ -105,9 +110,10 @@ func (d *Desktop) Key(ctx context.Context, keys string, repeat int) error {
 	return err
 }
 
-// TypeASCII types printable ASCII text, including newlines and tabs.
+// TypeASCII types printable ASCII text, including newlines and tabs. The text
+// goes through stdin, not on a command line.
 func (d *Desktop) TypeASCII(ctx context.Context, text string) error {
-	_, err := d.xdotool(ctx, "type", "--delay", "12", "--", text)
+	_, err := d.runInput(ctx, text, "xdotool", "type", "--delay", "12", "--file", "-")
 	return err
 }
 
@@ -311,10 +317,15 @@ func (d *Desktop) xdotool(ctx context.Context, args ...string) (string, error) {
 }
 
 func (d *Desktop) run(ctx context.Context, name string, args ...string) (string, error) {
+	return d.runInput(ctx, "", name, args...)
+}
+
+func (d *Desktop) runInput(ctx context.Context, stdin, name string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Env = d.env()
+	cmd.Stdin = strings.NewReader(stdin)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Run(); err != nil {

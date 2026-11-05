@@ -11,15 +11,17 @@ command_args="-listen 127.0.0.1:$KIVORA_WEB_PORT -vnc 127.0.0.1:$KIVORA_VNC_PORT
 # The control socket is group-accessible: only members of kivora-ctl (the
 # desktop account, not the worker) can read or request control.
 command_user="kivora-web:kivora-ctl"
+# The port is below 1024: no other account can take it during a restart and serve
+# the human's browser, which would hand it the session cookie.
+capabilities="^cap_net_bind_service"
 respawn_delay=2
-# Restart after crashes, giving up only on a crash loop (5 within a minute).
-respawn_max=5
-respawn_period=60
+# Never give up: what stopped it may be gone a moment later.
+respawn_max=0
 output_log=/var/log/kivora-web.log
 error_log=/var/log/kivora-web.log
 
 depend() {
-	need net
+	need net kivora-firewall kivora-data
 	after kivora-vnc
 }
 

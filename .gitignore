@@ -21,6 +21,10 @@ coverage.*
 /images/
 /build/
 
+# Copies of the backups, as in the README, and what opens them
+/backups/
+/backup.passphrase
+
 # Local environment
 .env
 .env.*

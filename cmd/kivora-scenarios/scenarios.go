@@ -123,7 +123,7 @@ var scenarios = []scenario{
 			return fmt.Errorf("expected two tabs: %s", oneLine(out))
 		}
 		var tabs []struct{ ID, URL string }
-		if err := json.Unmarshal([]byte(out), &tabs); err != nil {
+		if err := json.Unmarshal([]byte(jsonList(out)), &tabs); err != nil {
 			return err
 		}
 		first := ""
@@ -430,7 +430,15 @@ var scenarios = []scenario{
 	{name: "worker_isolation", run: func(r *runner) error {
 		out, err := r.call("shell_run", map[string]any{"command": "id -un; cat /home/agent/.Xauthority >/dev/null 2>&1 && echo LEAK-X; " +
 			"wget -q -T 3 -O- http://127.0.0.1:9222/json/version >/dev/null 2>&1 && echo LEAK-CDP; " +
-			"wget -q -T 3 -O- http://192.168.1.1/ >/dev/null 2>&1 && echo LEAK-LAN; echo done"})
+			"gw=$(ip -4 route show default | awk '{print $3; exit}'); nc -z -w2 $gw 53 && echo LEAK-LAN; " +
+			"cat /var/lib/kivora-vault/secrets.json >/dev/null 2>&1 && echo LEAK-VAULT; " +
+			"ls /var/lib/kivora-audit >/dev/null 2>&1 && echo LEAK-AUDIT; " +
+			"nc -z -w2 127.0.0.1 5900 && echo LEAK-VNC; nc -z -w2 127.0.0.1 680 && echo LEAK-WEB; " +
+			"own=$(ip -4 -o addr show scope global | awk '{split($4, a, \"/\"); print a[1]; exit}'); nc -z -w2 $own 22 && echo LEAK-SSH; " +
+			"ps -o user | grep -qvE 'USER|worker' && echo LEAK-PROC; " +
+			"curl -s -m 5 --noproxy '*' -o /dev/null https://example.com && echo LEAK-NET; " +
+			"nslookup example.com >/dev/null 2>&1 && echo LEAK-DNS; " +
+			"curl -s -m 5 -o /dev/null https://example.com && echo LEAK-PROXY; echo done"})
 		if err != nil {
 			return err
 		}
@@ -504,7 +512,7 @@ var scenarios = []scenario{
 		if err := contains(before, v); err != nil {
 			return fmt.Errorf("cookie not set before the restart: %w", err)
 		}
-		if _, err := r.script("", "ssh.sh", "doas rc-service -q kivora-browser restart"); err != nil {
+		if _, err := r.admin("", "ssh", "doas rc-service -q kivora-browser restart"); err != nil {
 			return err
 		}
 		if _, err := r.navigate("https://httpbin.org/cookies"); err != nil {
@@ -517,11 +525,11 @@ var scenarios = []scenario{
 		return contains(page, v)
 	}},
 	{name: "secret_fill", host: true, run: func(r *runner) error {
-		value := "Sc-" + unique()
-		if _, err := r.script(value, "secret.sh", "set", "scenario-secret", "https://httpbin.org"); err != nil {
+		value := "sc-" + unique() + "@example.com"
+		if _, err := r.admin(value, "secret", "set", "--field", "text", "scenario-secret", "https://httpbin.org"); err != nil {
 			return err
 		}
-		defer r.script("", "secret.sh", "delete", "scenario-secret")
+		defer r.admin("", "secret", "delete", "scenario-secret")
 		if _, err := r.navigate("https://httpbin.org/forms/post"); err != nil {
 			return err
 		}
@@ -529,7 +537,7 @@ var scenarios = []scenario{
 		if err != nil {
 			return err
 		}
-		id, err := element(page, `"custtel"`)
+		id, err := element(page, `"custemail"`)
 		if err != nil {
 			return err
 		}
@@ -554,10 +562,14 @@ var scenarios = []scenario{
 		if err != nil {
 			return err
 		}
-		return contains(echo, value)
+		if strings.Contains(echo, value) {
+			return fmt.Errorf("secret value reached the model after the submit")
+		}
+		// httpbin echoes the submitted form: the site got it, the model did not.
+		return contains(echo, "[secret hidden]")
 	}},
 	{name: "chromium_crash", host: true, run: func(r *runner) error {
-		if _, err := r.script("", "ssh.sh", "doas pkill -KILL -f '[/]usr/lib/chromium/chromium'"); err != nil {
+		if _, err := r.admin("", "ssh", "doas pkill -KILL -f '[/]usr/lib/chromium/chromium'"); err != nil {
 			return err
 		}
 		out, err := r.navigate("https://example.com")
@@ -567,10 +579,9 @@ var scenarios = []scenario{
 		return contains(out, "example.com")
 	}},
 	{name: "internet_loss", host: true, run: func(r *runner) error {
-		// A temporary firewall table rejects everything leaving the libvirt
-		// network: the Internet is gone, the server's SSH link stays up, and
-		// no DHCP renewal can undo it.
-		if _, err := r.script("", "ssh.sh", cutInternet); err != nil {
+		// A temporary firewall table rejects everything leaving the VM: the
+		// Internet is gone, and the server's SSH link stays up.
+		if _, err := r.admin("", "ssh", cutInternet); err != nil {
 			return err
 		}
 		restored := false
@@ -579,7 +590,7 @@ var scenarios = []scenario{
 				return nil
 			}
 			restored = true
-			_, err := r.script("", "ssh.sh", restoreInternet)
+			_, err := r.admin("", "ssh", restoreInternet)
 			return err
 		}
 		defer restore()
@@ -601,12 +612,16 @@ var scenarios = []scenario{
 }
 
 const (
+	// Everything but SSH replies and DNS: the Internet is gone, whatever network
+	// the VM is on, while the MCP session stays up.
 	cutInternet = `doas nft -f - <<'EOF'
 table inet kivoradesk_fault {
 	chain output {
 		type filter hook output priority filter; policy accept;
 		oifname "lo" accept
-		ip daddr != 192.168.122.0/24 reject
+		tcp sport 22 accept
+		udp dport 53 accept
+		reject
 	}
 }
 EOF`

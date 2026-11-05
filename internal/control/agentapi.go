@@ -27,7 +27,7 @@ const MaxWait = 10 * time.Minute
 func AgentHandler(s *State) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /state", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, s.Get())
+		writeJSON(w, s.ForAgent())
 	})
 	mux.HandleFunc("POST /request", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -57,7 +57,7 @@ func AgentHandler(s *State) http.Handler {
 				http.Error(w, "invalid timeout", http.StatusBadRequest)
 				return
 			}
-			timeout = min(time.Duration(secs)*time.Second, MaxWait)
+			timeout = time.Duration(min(secs, int(MaxWait/time.Second))) * time.Second
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), timeout)
 		defer cancel()

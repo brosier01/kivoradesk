@@ -2,8 +2,11 @@ package control
 
 import (
 	"context"
+	"strings"
+	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func TestSetNotifiesAndBumpsSeq(t *testing.T) {
@@ -79,5 +82,179 @@ func TestParseOwner(t *testing.T) {
 	}
 	if _, err := ParseOwner("root"); err == nil {
 		t.Error(`ParseOwner("root") succeeded`)
+	}
+}
+
+func TestRestoreNeverHandsControlToTheAgent(t *testing.T) {
+	cases := map[Owner]Owner{Agent: Agent, Paused: Paused, Human: Paused, "nonsense": Paused, "": Paused}
+	for saved, want := range cases {
+		snap := Restore(Snapshot{Owner: saved, Seq: 41, Request: "log in"}).Get()
+		if snap.Owner != want || snap.Seq != 42 || snap.Request != "log in" {
+			t.Errorf("Restore(%q) = %+v, want owner %q, seq 42 and the request", saved, snap, want)
+		}
+	}
+}
+
+// A listener that does not return must not hold the others or the record.
+func TestStuckListenerHoldsNeitherTheRecordNorTheOthers(t *testing.T) {
+	s := New(Agent)
+	saved := make(chan Owner, 1)
+	s.Persist(func(snap Snapshot) { saved <- snap.Owner })
+	release := make(chan struct{})
+	s.OnChange(func(Snapshot) { <-release })
+	other := make(chan struct{})
+	s.OnChange(func(Snapshot) { close(other) })
+
+	done := make(chan struct{})
+	go func() {
+		s.Set(Human)
+		close(done)
+	}()
+	select {
+	case <-other:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the other listener did not run")
+	}
+	select {
+	case owner := <-saved:
+		if owner != Human {
+			t.Fatalf("recorded %s", owner)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the change was not recorded")
+	}
+	if !s.Is(Human) {
+		t.Fatal("the owner did not change at once")
+	}
+	select {
+	case <-done:
+		t.Fatal("Set returned before every listener reacted")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(release)
+	<-done
+}
+
+func TestPersistRunsBeforeListeners(t *testing.T) {
+	s := New(Agent)
+	var order []string
+	var mu sync.Mutex
+	add := func(what string) {
+		mu.Lock()
+		defer mu.Unlock()
+		order = append(order, what)
+	}
+	s.Persist(func(Snapshot) { add("persist") })
+	s.OnChange(func(Snapshot) { add("listener") })
+	s.Set(Paused)
+	if strings.Join(order, ",") != "persist,listener" {
+		t.Fatalf("order = %v", order)
+	}
+}
+
+// The agent must not act before what the human held is released, and a waiter
+// must not wake up before it either.
+func TestAgentGetsControlOnlyOnceListenersReacted(t *testing.T) {
+	s := New(Human)
+	release := make(chan struct{})
+	reacted := make(chan struct{})
+	s.OnChange(func(snap Snapshot) {
+		if snap.Owner == Agent {
+			close(reacted)
+			<-release
+		}
+	})
+	seq := s.Get().Seq
+	woken := make(chan Snapshot, 1)
+	go func() {
+		snap, _ := s.Wait(context.Background(), seq)
+		woken <- snap
+	}()
+	go s.Set(Agent)
+	<-reacted
+
+	if got := s.ForAgent(); got.Owner != Human {
+		t.Fatalf("the agent sees %s while the keys are being released", got.Owner)
+	}
+	if !s.Is(Agent) {
+		t.Fatalf("the owner is %s", s.Get().Owner)
+	}
+	select {
+	case snap := <-woken:
+		t.Fatalf("Wait returned %+v before the listener finished", snap)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(release)
+	if snap := <-woken; snap.Owner != Agent {
+		t.Fatalf("Wait returned %+v", snap)
+	}
+	if got := s.ForAgent(); got.Owner != Agent {
+		t.Fatalf("the agent sees %s once settled", got.Owner)
+	}
+}
+
+// Away from the agent, the change applies at once, even with a listener stuck.
+func TestAgentLosesControlAtOnce(t *testing.T) {
+	s := New(Agent)
+	release := make(chan struct{})
+	defer close(release)
+	reacted := make(chan struct{})
+	s.OnChange(func(Snapshot) {
+		close(reacted)
+		<-release
+	})
+	go s.Set(Human)
+	<-reacted
+	if got := s.ForAgent(); got.Owner != Human {
+		t.Fatalf("the agent sees %s", got.Owner)
+	}
+}
+
+func TestSeqStrictlyGrowsUnderConcurrentChanges(t *testing.T) {
+	s := New(Agent)
+	var mu sync.Mutex
+	seen := map[uint64]bool{}
+	s.OnChange(func(snap Snapshot) {
+		mu.Lock()
+		defer mu.Unlock()
+		if seen[snap.Seq] {
+			t.Errorf("seq %d seen twice", snap.Seq)
+		}
+		seen[snap.Seq] = true
+	})
+	var wg sync.WaitGroup
+	for i := range 8 {
+		wg.Go(func() {
+			for j := range 100 {
+				switch (i + j) % 3 {
+				case 0:
+					s.Set(Human)
+				case 1:
+					s.RequestHuman("help")
+				default:
+					s.Set(Agent)
+				}
+			}
+		})
+	}
+	wg.Wait()
+	if got, want := s.ForAgent().Seq, s.Get().Seq; s.Is(Agent) && got != want {
+		t.Fatalf("settled at seq %d, current %d", got, want)
+	}
+}
+
+func TestLongRequestIsShortened(t *testing.T) {
+	long := strings.Repeat("é", MaxRequest+100)
+	for name, got := range map[string]string{
+		"request": New(Agent).RequestHuman(long).Request,
+		"restore": Restore(Snapshot{Owner: Paused, Request: long}).Get().Request,
+	} {
+		if utf8.RuneCountInString(got) > MaxRequest+20 || !strings.HasSuffix(got, "(shortened)") || !utf8.ValidString(got) {
+			t.Errorf("%s: %d characters: %q", name, utf8.RuneCountInString(got), got)
+		}
+	}
+	short := strings.Repeat("a", MaxRequest)
+	if got := New(Agent).RequestHuman(short).Request; got != short {
+		t.Errorf("a reason within the limit became %q", got)
 	}
 }
