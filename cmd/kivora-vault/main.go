@@ -70,9 +70,12 @@ func run(path string, args []string, stdin io.Reader, stdout io.Writer) error {
 		if fl.NArg() < 2 {
 			return errors.New(usage)
 		}
-		value, err := io.ReadAll(io.LimitReader(stdin, maxInput))
+		value, err := io.ReadAll(io.LimitReader(stdin, maxInput+1))
 		if err != nil {
 			return err
+		}
+		if len(value) > maxInput {
+			return fmt.Errorf("the value is longer than %d bytes", maxInput)
 		}
 		name := fl.Arg(0)
 		if err := store.Set(name, *field, fl.Args()[1:], strings.TrimRight(string(value), "\r\n")); err != nil {

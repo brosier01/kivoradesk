@@ -48,3 +48,20 @@ func TestVaultCommands(t *testing.T) {
 		t.Fatal("unknown command accepted")
 	}
 }
+
+// A value is stored whole or not at all.
+func TestSetRefusesWhatItCannotKeep(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "secrets.json")
+	set := func(value string) error {
+		return run(path, []string{"set", "s", "https://a.example"}, strings.NewReader(value), &bytes.Buffer{})
+	}
+	if err := set(strings.Repeat("x", maxInput+1)); err == nil || !strings.Contains(err.Error(), "longer") {
+		t.Fatalf("a value over the limit: %v", err)
+	}
+	if err := set("caf\xe9"); err == nil {
+		t.Fatal("a value that is not UTF-8 was accepted")
+	}
+	if err := set(strings.Repeat("x", maxInput)); err != nil {
+		t.Fatalf("a value at the limit: %v", err)
+	}
+}

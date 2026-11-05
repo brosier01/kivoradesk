@@ -12,13 +12,20 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
+	"syscall"
+	"unicode/utf8"
+
+	"golang.org/x/net/idna"
 )
 
 // Field kinds say which inputs may receive a secret.
@@ -65,15 +72,34 @@ type Store struct {
 
 var validName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$`)
 
+// hostNames gives a host name the form browsers report in location.origin.
+// Underscores, which are not valid in domain names, still occur in real ones.
+var hostNames = idna.New(idna.MapForLookup(), idna.StrictDomainName(false))
+
 // NormalizeOrigin reduces a URL or origin to scheme://host[:port], dropping
-// default ports. Only https origins are accepted, plus http on localhost.
+// default ports, with the host as a browser reports it. Only https origins are
+// accepted, plus http on localhost.
 func NormalizeOrigin(raw string) (string, error) {
+	invalid := fmt.Errorf("invalid origin %q (expected e.g. https://accounts.example.com)", raw)
 	u, err := url.Parse(strings.TrimSpace(raw))
-	if err != nil || u.Host == "" {
-		return "", fmt.Errorf("invalid origin %q (expected e.g. https://accounts.example.com)", raw)
+	if err != nil || u.Hostname() == "" {
+		return "", invalid
 	}
 	host := strings.ToLower(u.Hostname())
+	if strings.Contains(host, "*") {
+		return "", fmt.Errorf("invalid origin %q: wildcards are not supported, list each site", raw)
+	}
+	if _, err := netip.ParseAddr(host); err != nil {
+		if host, err = hostNames.ToASCII(host); err != nil || host == "" {
+			return "", invalid
+		}
+	}
 	port := u.Port()
+	if port != "" {
+		if n, err := strconv.ParseUint(port, 10, 16); err != nil || n == 0 {
+			return "", invalid
+		}
+	}
 	switch {
 	case u.Scheme == "https":
 		if port == "443" {
@@ -86,8 +112,11 @@ func NormalizeOrigin(raw string) (string, error) {
 	default:
 		return "", fmt.Errorf("origin %q must use https", raw)
 	}
-	if port != "" {
-		host += ":" + port
+	switch {
+	case port != "":
+		host = net.JoinHostPort(host, port)
+	case strings.Contains(host, ":"):
+		host = "[" + host + "]"
 	}
 	return u.Scheme + "://" + host, nil
 }
@@ -128,10 +157,48 @@ func (s *Store) save(m map[string]Secret) error {
 		tmp.Close()
 		return err
 	}
+	// On disk before it replaces the old file: a power cut must leave one or
+	// the other, whole.
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmp.Name(), s.Path)
+	if err := os.Rename(tmp.Name(), s.Path); err != nil {
+		return err
+	}
+	dir, err := os.Open(filepath.Dir(s.Path))
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return dir.Sync()
+}
+
+// update changes the store under a lock: two commands at once would otherwise
+// lose each other's changes.
+func (s *Store) update(change func(map[string]Secret) error) error {
+	if err := os.MkdirAll(filepath.Dir(s.Path), 0o700); err != nil {
+		return err
+	}
+	lock, err := os.OpenFile(s.Path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+		return err
+	}
+	m, err := s.load()
+	if err != nil {
+		return err
+	}
+	if err := change(m); err != nil {
+		return err
+	}
+	return s.save(m)
 }
 
 func (sec Secret) field() string {
@@ -155,6 +222,9 @@ func (s *Store) Set(name, field string, origins []string, value string) error {
 	if value == "" {
 		return errors.New("empty value")
 	}
+	if !utf8.ValidString(value) || strings.ContainsRune(value, 0) {
+		return errors.New("the value is not valid text: it must be UTF-8, without a null character")
+	}
 	if len(origins) == 0 {
 		return errors.New("at least one origin is required")
 	}
@@ -168,25 +238,21 @@ func (s *Store) Set(name, field string, origins []string, value string) error {
 			norm = append(norm, n)
 		}
 	}
-	m, err := s.load()
-	if err != nil {
-		return err
-	}
-	m[name] = Secret{Origins: norm, Value: value, Field: field}
-	return s.save(m)
+	return s.update(func(m map[string]Secret) error {
+		m[name] = Secret{Origins: norm, Value: value, Field: field}
+		return nil
+	})
 }
 
 // Delete removes a secret.
 func (s *Store) Delete(name string) error {
-	m, err := s.load()
-	if err != nil {
-		return err
-	}
-	if _, ok := m[name]; !ok {
-		return fmt.Errorf("no secret named %q", name)
-	}
-	delete(m, name)
-	return s.save(m)
+	return s.update(func(m map[string]Secret) error {
+		if _, ok := m[name]; !ok {
+			return fmt.Errorf("no secret named %q", name)
+		}
+		delete(m, name)
+		return nil
+	})
 }
 
 // List returns names, origins and field kinds, sorted by name. Values are not
