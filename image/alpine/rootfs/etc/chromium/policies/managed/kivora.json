@@ -3,17 +3,20 @@
     "file://*",
     "chrome://*",
     "chrome-search://*",
+    "chrome-extension://*",
     "devtools://*",
     "chrome-devtools://*",
     "view-source:*",
     "javascript://*",
-    "localhost:5900", "127.0.0.1:5900", "[::1]:5900", "0.0.0.0:5900",
-    "localhost:6080", "127.0.0.1:6080", "[::1]:6080", "0.0.0.0:6080",
-    "localhost:9222", "127.0.0.1:9222", "[::1]:9222", "0.0.0.0:9222"
+    "localhost:5900", "127.0.0.1:5900", "[::1]:5900", "0.0.0.0:5900", "[::ffff:7f00:1]:5900",
+    "localhost:680", "127.0.0.1:680", "[::1]:680", "0.0.0.0:680", "[::ffff:7f00:1]:680",
+    "localhost:9222", "127.0.0.1:9222", "[::1]:9222", "0.0.0.0:9222", "[::ffff:7f00:1]:9222"
   ],
   "URLAllowlist": [
     "chrome://newtab",
-    "chrome://new-tab-page"
+    "chrome://new-tab-page",
+    "chrome://omnibox-popup.top-chrome",
+    "chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai"
   ],
   "ExtensionInstallBlocklist": ["*"],
   "AllowFileSelectionDialogs": false,
@@ -22,5 +25,11 @@
   "AutofillAddressEnabled": false,
   "AutofillCreditCardEnabled": false,
   "BrowserSignin": 0,
-  "SyncDisabled": true
+  "SyncDisabled": true,
+  "ScreenCaptureAllowed": false,
+  "DefaultClipboardSetting": 2,
+  "BrowserAddPersonEnabled": false,
+  "BrowserGuestModeEnabled": false,
+  "IncognitoModeAvailability": 1,
+  "ExternalProtocolDialogShowAlwaysOpenCheckbox": false
 }
