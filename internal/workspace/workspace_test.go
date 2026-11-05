@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"unicode/utf8"
+
+	"golang.org/x/sys/unix"
 )
 
 func TestSanitizeName(t *testing.T) {
@@ -118,5 +120,88 @@ func TestCleanupDoesNotFollowASwappedDirectory(t *testing.T) {
 	}
 	if _, err := os.Stat(dir + ".old/x.txt"); err == nil {
 		t.Fatal("partial file left behind")
+	}
+}
+
+// fakeDisk replaces statfs: free gives the bytes free outside the reserve at
+// each call, counted from 1. It returns the number of calls.
+func fakeDisk(t *testing.T, free func(calls int) uint64) *int {
+	t.Helper()
+	calls := 0
+	statfs = func(fd int, st *unix.Statfs_t) error {
+		calls++
+		st.Bsize = 1
+		st.Bavail = free(calls)
+		return nil
+	}
+	t.Cleanup(func() { statfs = unix.Fstatfs })
+	return &calls
+}
+
+func TestCreateRefusesAFullDisk(t *testing.T) {
+	root := t.TempDir()
+	fakeDisk(t, func(int) uint64 { return minFree })
+	if _, err := Create(root, "downloads", "a.txt", strings.NewReader("x"), 10); !errors.Is(err, ErrDiskFull) {
+		t.Fatalf("Create = %v, want ErrDiskFull", err)
+	}
+	if entries, _ := os.ReadDir(filepath.Join(root, "downloads")); len(entries) != 0 {
+		t.Fatalf("file created on a full disk: %v", entries)
+	}
+}
+
+func TestCreateStopsWhenTheDiskFills(t *testing.T) {
+	root := t.TempDir()
+	// Room for two checks, then the disk is full.
+	calls := fakeDisk(t, func(n int) uint64 {
+		if n <= 2 {
+			return 100 << 20
+		}
+		return minFree / 2
+	})
+	big := strings.NewReader(strings.Repeat("x", 3*checkEvery))
+	if _, err := Create(root, "", "big", big, 1<<30); !errors.Is(err, ErrDiskFull) {
+		t.Fatalf("Create = %v, want ErrDiskFull", err)
+	}
+	if *calls != 3 {
+		t.Fatalf("free space checked %d times, want 3", *calls)
+	}
+	if entries, _ := os.ReadDir(root); len(entries) != 0 {
+		t.Fatalf("partial file left behind: %v", entries)
+	}
+}
+
+func TestCreateNeverWritesPastTheFreeSpace(t *testing.T) {
+	root := t.TempDir()
+	// 1000 bytes above the floor, used up by the write.
+	disk := func(n int) uint64 {
+		if n == 1 {
+			return minFree + 1000
+		}
+		return minFree
+	}
+	fakeDisk(t, disk)
+	if _, err := Create(root, "", "a", strings.NewReader(strings.Repeat("x", 1000)), 1<<20); err != nil {
+		t.Fatalf("Create of 1000 bytes: %v", err)
+	}
+	fakeDisk(t, disk)
+	if _, err := Create(root, "", "b", strings.NewReader(strings.Repeat("x", 1001)), 1<<20); !errors.Is(err, ErrDiskFull) {
+		t.Fatalf("Create of 1001 bytes = %v, want ErrDiskFull", err)
+	}
+}
+
+func TestCreateWritesWithRoom(t *testing.T) {
+	root := t.TempDir()
+	calls := fakeDisk(t, func(int) uint64 { return 1 << 30 })
+	data := strings.Repeat("y", checkEvery+10)
+	rel, err := Create(root, "downloads", "ok.bin", strings.NewReader(data), 1<<30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(root, rel)); string(b) != data {
+		t.Fatalf("wrote %d bytes, want %d", len(b), len(data))
+	}
+	// Once before and once after checkEvery bytes.
+	if *calls != 2 {
+		t.Fatalf("free space checked %d times, want 2", *calls)
 	}
 }
