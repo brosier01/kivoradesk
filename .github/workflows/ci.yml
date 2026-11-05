@@ -27,4 +27,8 @@ jobs:
       - name: Shell scripts parse
         run: |
           for script in scripts/vm/*.sh; do bash -n "$script"; done
+          for script in docker/*.sh; do bash -n "$script"; done
           sh -n image/alpine/provision.sh
+          sh -n docker/doctor-guest.sh
+      - name: Image
+        run: docker compose build

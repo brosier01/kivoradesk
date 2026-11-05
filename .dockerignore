@@ -1,0 +1,7 @@
+*
+!cmd
+!docker
+!go.mod
+!go.sum
+!image
+!internal
