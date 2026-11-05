@@ -66,6 +66,8 @@ firmer boundaries between the web, the agent and the server.
 - `kivora restore` installs what the image brings in the VM again.
 - `kivora-scenarios`, `kivora-bench` and the fault tests take the command that runs
   the admin commands: `-admin` or `KIVORA_ADMIN`.
+- `kivora-scenarios` has 41 scenarios: new ones check the boundaries, and `-destructive`
+  adds those that restart the VM or damage its data disk.
 
 ### Removed
 
@@ -156,18 +158,28 @@ firmer boundaries between the web, the agent and the server.
 
 ### Measured
 
-On 2026-11-05, before the last fixes:
+On the final code, on 2026-11-05, from a clean clone on Ubuntu 24.04 with Docker 29.1,
+on a disposable instance:
 
-- Scenario suite: 300/300 runs on an install from scratch, on Ubuntu 24.04. All the
-  integration tests pass, fault injection included.
+- Scenario suite: 380/380 runs, 10 of each of the 38 scenarios with `-admin`, and the
+  3 destructive ones. `kivora doctor` and `kivora check-isolation` clean.
+- All the integration tests pass, fault injection included.
+- An update with a change in the VM, its data kept.
+- The benchmark: 13.4 s from a reboot to working MCP tools, 585 MiB of memory at idle.
+- `go test -race`, `go vet` and `gofmt` clean.
+
+On an earlier state of this version, before these last fixes:
+
 - From blank servers, with their distribution's Docker packages: 30/30 scenarios on
   Debian 13 and on Fedora 44 with SELinux enforcing, with `kivora doctor` and
   `kivora check-isolation` clean on each, and backup, restore, recovery, restart and
   update.
 - A laptop on another machine, through a published port and through `ProxyJump`.
-- The live view in Chromium and Firefox on Linux, through the tunnel: takeover, clicks,
-  typing and handing control back.
 - `govulncheck` finds no known vulnerabilities.
+
+The live view was tested through the tunnel in Chromium and Firefox on Linux, with the
+real VNC server: takeover, clicks, typing and handing control back. This was done
+before the last merge of the fixes, not on the final code.
 
 ### Known limitations
 
@@ -178,7 +190,8 @@ On 2026-11-05, before the last fixes:
 - The server's addresses are read at each `up`: a public address that changes in
   between is only known at the next one. One on none of its interfaces, behind NAT,
   must be listed in `KIVORA_PUBLIC_ADDRESSES`.
-- The installation was tested on nested servers, not yet on a cloud server or with
+- The final code was tested on Ubuntu 24.04 only: Debian 13 and Fedora 44 ran an earlier
+  state of this version. The installation was not tested yet on a cloud server or with
   rootless Docker, and the laptop steps from Linux, not yet from macOS. The live view
   was not tested in Safari or on a real phone.
 - The browser is not limited to allowed sites: a page can still lead the agent to send
