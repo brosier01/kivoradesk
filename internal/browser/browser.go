@@ -2,13 +2,13 @@
 // navigation, tabs, reading pages as text and acting on page elements.
 //
 // It always works on the tab the human sees (the visible one), so that the
-// structured tools and the screenshots describe the same desktop. Its scripts
-// run in an isolated world, out of reach of the JavaScript of the page.
+// structured tools and the screenshots describe the same desktop. The browser
+// says which tab that is, not the pages. Its scripts run in an isolated world,
+// out of reach of the JavaScript of the page.
 package browser
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -34,9 +35,40 @@ const StartupWait = 30 * time.Second
 // NavigationTimeout bounds a navigation, including the page load.
 const NavigationTimeout = 45 * time.Second
 
-// tabProbeTimeout bounds asking a tab whether it is visible. A tab that does
-// not answer is busy, or showing a dialog.
-const tabProbeTimeout = 3 * time.Second
+const (
+	// tabProbeTimeout bounds a short question to a tab. A tab that does not
+	// answer is busy, or showing a dialog.
+	tabProbeTimeout = 3 * time.Second
+	// tabWorkTimeout bounds a script that goes through the whole page, or an
+	// input event that the page handles.
+	tabWorkTimeout = 15 * time.Second
+	// stuckProbes is how many probes in a row a loading page may leave without an
+	// answer before it counts as not responding.
+	stuckProbes = 3
+)
+
+// What a page gives back is kept to a size that makes sense in a tool result: a
+// page can make any of these as long as it wants.
+const (
+	maxTitle = 500
+	maxURL   = 2000
+	maxType  = 40
+)
+
+// ErrTabStuck says that the visible tab does not answer.
+var ErrTabStuck = errors.New("the browser tab does not respond, because the page is busy or shows a dialog: take a screenshot and use computer_key, or close it with browser_close_tab")
+
+// ThirdPartyError is an error holding text that a site chose. The MCP server
+// marks that text as untrusted.
+type ThirdPartyError struct {
+	Message string // ours
+	Detail  string // the site's
+}
+
+func (e *ThirdPartyError) Error() string { return e.Message + ": " + e.Detail }
+
+// allowLocalPages lets the tests use pages served by this computer.
+var allowLocalPages = false
 
 // Browser is a lazily (re)connected DevTools client.
 type Browser struct {
@@ -49,10 +81,13 @@ type Browser struct {
 
 // Tab describes a browser tab.
 type Tab struct {
-	ID     string `json:"id"`
-	Title  string `json:"title"`
-	URL    string `json:"url"`
-	Active bool   `json:"active"`
+	ID       string `json:"id"`
+	Title    string `json:"title"`
+	URL      string `json:"url"`
+	Active   bool   `json:"active"`
+	OpenedBy string `json:"opened_by,omitempty"` // the tab that opened this one: a popup, a target=_blank link
+	// Switched says that an action brought another tab or window on screen.
+	Switched bool `json:"-"`
 }
 
 // Element is an interactive element found by ReadPage, addressed by ID.
@@ -71,6 +106,11 @@ type Page struct {
 	Text      string    `json:"text"`
 	Truncated bool      `json:"truncated"`
 	Elements  []Element `json:"elements"`
+	// MoreElements says that the page has more elements than were numbered.
+	MoreElements bool `json:"more_elements"`
+	// Frames and ShadowRoots count what the tools cannot read or act on.
+	Frames      int `json:"frames"`
+	ShadowRoots int `json:"shadow_roots"`
 }
 
 func (b *Browser) connect(ctx context.Context) (*cdp.Conn, error) {
@@ -115,29 +155,38 @@ func (b *Browser) reset() {
 	b.conn, b.pages = nil, nil
 }
 
-type target struct {
-	ID    string `json:"targetId"`
-	Type  string `json:"type"`
-	Title string `json:"title"`
-	URL   string `json:"url"`
-}
-
-func (b *Browser) targets(ctx context.Context, conn *cdp.Conn) ([]target, error) {
-	var res struct {
-		TargetInfos []target `json:"targetInfos"`
-	}
-	if err := conn.Call(ctx, "", "Target.getTargets", nil, &res); err != nil {
+// tabs returns the browser's tabs, the one on screen first. Browser UI that also
+// shows up as pages, such as the omnibox popups, is left out. A tab the human
+// opened on a browser page is a tab like another: only reading it is refused.
+func (b *Browser) tabs(ctx context.Context) ([]cdp.Target, error) {
+	targets, err := cdp.ListTargets(ctx, b.Endpoint)
+	if err != nil {
 		return nil, err
 	}
-	var tabs []target
-	for _, t := range res.TargetInfos {
-		// Browser UI (omnibox popups, extensions) also shows up as pages.
-		if t.Type == "page" && !strings.HasPrefix(t.URL, "chrome://omnibox-popup") &&
-			!strings.HasPrefix(t.URL, "chrome-untrusted://") && !strings.HasPrefix(t.URL, "chrome-extension://") {
+	var tabs []cdp.Target
+	for _, t := range targets {
+		if t.Type == "page" && !strings.Contains(t.URL, ".top-chrome") && !strings.HasPrefix(t.URL, "chrome-untrusted://") {
 			tabs = append(tabs, t)
 		}
 	}
+	b.forgetOthers(tabs)
 	return tabs, nil
+}
+
+// forgetOthers drops what is kept about the tabs that no longer exist.
+func (b *Browser) forgetOthers(tabs []cdp.Target) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for id, p := range b.pages {
+		open := false
+		for _, t := range tabs {
+			open = open || t.ID == id
+		}
+		if !open {
+			b.conn.Forget(p)
+			delete(b.pages, id)
+		}
+	}
 }
 
 func (b *Browser) attach(ctx context.Context, conn *cdp.Conn, id string) (*cdp.Page, error) {
@@ -151,77 +200,115 @@ func (b *Browser) attach(ctx context.Context, conn *cdp.Conn, id string) (*cdp.P
 	if err != nil {
 		return nil, err
 	}
-	b.mu.Lock()
-	if b.pages != nil {
-		b.pages[id] = p
-	}
-	b.mu.Unlock()
+	b.keep(ctx, p)
 	return p, nil
 }
 
-// Tabs lists the tabs; the visible one is marked active.
+// keep remembers an attached page and follows its dialogs. A page that does not
+// answer now is reported by the call that comes next.
+func (b *Browser) keep(ctx context.Context, p *cdp.Page) {
+	sctx, cancel := context.WithTimeout(ctx, tabProbeTimeout)
+	defer cancel()
+	p.FollowDialogs(sctx)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.pages != nil {
+		b.pages[p.TargetID] = p
+	}
+}
+
+// Tabs lists the tabs, the one on screen first and marked active.
 func (b *Browser) Tabs(ctx context.Context) ([]Tab, error) {
 	var tabs []Tab
 	err := b.retry(ctx, func(conn *cdp.Conn) error {
-		ts, err := b.targets(ctx, conn)
+		ts, err := b.tabs(ctx)
 		if err != nil {
 			return err
 		}
+		var infos struct {
+			TargetInfos []struct {
+				ID     string `json:"targetId"`
+				Opener string `json:"openerId"`
+			} `json:"targetInfos"`
+		}
+		if err := conn.Call(ctx, "", "Target.getTargets", nil, &infos); err != nil {
+			return err
+		}
+		opener := make(map[string]string, len(infos.TargetInfos))
+		for _, info := range infos.TargetInfos {
+			opener[info.ID] = info.Opener
+		}
 		tabs = tabs[:0]
-		for _, t := range ts {
-			tab := Tab{ID: t.ID, Title: t.Title, URL: t.URL}
-			if p, err := b.attach(ctx, conn, t.ID); err == nil {
-				tab.Active, _ = visible(ctx, p)
-			}
-			tabs = append(tabs, tab)
+		for i, t := range ts {
+			tabs = append(tabs, Tab{ID: t.ID, Title: cut(t.Title, maxTitle), URL: cut(t.URL, maxURL), Active: i == 0, OpenedBy: opener[t.ID]})
 		}
 		return nil
 	})
 	return tabs, err
 }
 
-// active returns the visible tab, or the first tab if none reports visible.
+// active returns the tab on screen.
 func (b *Browser) active(ctx context.Context, conn *cdp.Conn) (*cdp.Page, error) {
-	ts, err := b.targets(ctx, conn)
+	ts, err := b.tabs(ctx)
 	if err != nil {
 		return nil, err
 	}
 	if len(ts) == 0 {
 		return nil, errors.New("no browser tab is open; use browser_new_tab")
 	}
-	var first *cdp.Page
-	stuck := false
-	for _, t := range ts {
-		p, err := b.attach(ctx, conn, t.ID)
-		if err != nil {
-			continue
-		}
-		if first == nil {
-			first = p
-		}
-		ok, err := visible(ctx, p)
-		if ok {
-			return p, nil
-		}
-		stuck = stuck || errors.Is(err, context.DeadlineExceeded)
-	}
-	if stuck {
-		return nil, errors.New("a browser tab does not respond, perhaps because of a dialog: take a screenshot and use computer_key, or close it with browser_close_tab")
-	}
-	if first == nil {
-		return nil, errors.New("could not attach to any tab")
-	}
-	return first, nil
+	return b.attach(ctx, conn, ts[0].ID)
 }
 
-func visible(ctx context.Context, p *cdp.Page) (bool, error) {
-	ctx, cancel := context.WithTimeout(ctx, tabProbeTimeout)
-	defer cancel()
-	var state string
-	if err := p.EvalIsolated(ctx, "document.visibilityState", &state); err != nil {
-		return false, err
+// onPage runs a call to a page, within limit. A page showing a dialog or stuck in
+// a loop answers nothing, and nothing would stop the call before the limit of the
+// whole tool otherwise.
+func onPage(ctx context.Context, p *cdp.Page, limit time.Duration, call func(context.Context) error) error {
+	dialog, opening := p.Dialog()
+	if dialog != nil {
+		return dialogError(dialog)
 	}
-	return state == "visible", nil
+	cctx, cancel := context.WithTimeout(ctx, limit)
+	defer cancel()
+	go func() {
+		select {
+		case <-opening:
+			cancel()
+		case <-cctx.Done():
+		}
+	}()
+	err := call(cctx)
+	if err == nil {
+		return nil
+	}
+	if dialog, _ := p.Dialog(); dialog != nil {
+		return dialogError(dialog)
+	}
+	if ctx.Err() == nil && errors.Is(cctx.Err(), context.DeadlineExceeded) {
+		return ErrTabStuck
+	}
+	return err
+}
+
+func dialogError(d *cdp.Dialog) error {
+	return &ThirdPartyError{
+		Message: fmt.Sprintf("the page shows a dialog (%s), and answers nothing until it closes: take a screenshot, then press Return or Escape with computer_key, or close the tab with browser_close_tab. Its text", d.Type),
+		Detail:  d.Message,
+	}
+}
+
+func eval(ctx context.Context, p *cdp.Page, expr string, out any) error {
+	return onPage(ctx, p, tabProbeTimeout, func(ctx context.Context) error { return p.EvalIsolated(ctx, expr, out) })
+}
+
+// cut limits a text from a page, on a character boundary.
+func cut(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && s[n]&0xC0 == 0x80 {
+		n--
+	}
+	return s[:n]
 }
 
 // retry runs fn, reconnecting once if the connection was lost (Chromium
@@ -243,7 +330,8 @@ func (b *Browser) retry(ctx context.Context, fn func(*cdp.Conn) error) error {
 func retryable(err error) bool {
 	msg := err.Error()
 	return strings.Contains(msg, "connection closed") || strings.Contains(msg, "connection reset") || strings.Contains(msg, "No session with given id") ||
-		strings.Contains(msg, "No target with given id") || strings.Contains(msg, "Session with given id not found")
+		strings.Contains(msg, "No target with given id") || strings.Contains(msg, "Session with given id not found") ||
+		strings.Contains(msg, "reach DevTools endpoint")
 }
 
 func (b *Browser) withActive(ctx context.Context, fn func(*cdp.Conn, *cdp.Page) error) error {
@@ -265,7 +353,8 @@ func (b *Browser) Navigate(ctx context.Context, rawURL string) (Tab, error) {
 	err = b.withActive(ctx, func(_ *cdp.Conn, p *cdp.Page) error {
 		nctx, cancel := context.WithTimeout(ctx, NavigationTimeout)
 		defer cancel()
-		if err := p.Navigate(nctx, u); err != nil {
+		err := onPage(nctx, p, NavigationTimeout, func(ctx context.Context) error { return p.Navigate(ctx, u) })
+		if err != nil {
 			if errors.Is(nctx.Err(), context.DeadlineExceeded) {
 				// Left pending, it keeps the tab from answering, even once the network is back.
 				sctx, cancel := context.WithTimeout(ctx, tabProbeTimeout)
@@ -292,14 +381,20 @@ func (b *Browser) History(ctx context.Context, delta int) (Tab, error) {
 				ID int `json:"id"`
 			} `json:"entries"`
 		}
-		if err := p.Call(ctx, "Page.getNavigationHistory", nil, &res); err != nil {
+		err := onPage(ctx, p, tabProbeTimeout, func(ctx context.Context) error {
+			return p.Call(ctx, "Page.getNavigationHistory", nil, &res)
+		})
+		if err != nil {
 			return err
 		}
 		i := res.CurrentIndex + delta
 		if i < 0 || i >= len(res.Entries) {
 			return errors.New("no page in that direction of the history")
 		}
-		if err := p.Call(ctx, "Page.navigateToHistoryEntry", map[string]any{"entryId": res.Entries[i].ID}, nil); err != nil {
+		err = onPage(ctx, p, tabProbeTimeout, func(ctx context.Context) error {
+			return p.Call(ctx, "Page.navigateToHistoryEntry", map[string]any{"entryId": res.Entries[i].ID}, nil)
+		})
+		if err != nil {
 			return err
 		}
 		return waitLoaded(ctx, p)
@@ -313,7 +408,10 @@ func (b *Browser) History(ctx context.Context, delta int) (Tab, error) {
 // Reload reloads the active tab.
 func (b *Browser) Reload(ctx context.Context) (Tab, error) {
 	err := b.withActive(ctx, func(_ *cdp.Conn, p *cdp.Page) error {
-		if err := p.Call(ctx, "Page.reload", nil, nil); err != nil {
+		err := onPage(ctx, p, tabProbeTimeout, func(ctx context.Context) error {
+			return p.Call(ctx, "Page.reload", nil, nil)
+		})
+		if err != nil {
 			return err
 		}
 		time.Sleep(200 * time.Millisecond)
@@ -330,7 +428,8 @@ func (b *Browser) Current(ctx context.Context) (Tab, error) {
 	var tab Tab
 	err := b.withActive(ctx, func(_ *cdp.Conn, p *cdp.Page) error {
 		var v struct{ Title, URL string }
-		if err := p.EvalIsolated(ctx, `({Title: document.title, URL: location.href})`, &v); err != nil {
+		script := fmt.Sprintf(`({Title: document.title.slice(0, %d), URL: location.href.slice(0, %d)})`, maxTitle, maxURL)
+		if err := eval(ctx, p, script, &v); err != nil {
 			return err
 		}
 		tab = Tab{ID: p.TargetID, Title: v.Title, URL: v.URL, Active: true}
@@ -353,11 +452,7 @@ func (b *Browser) NewTab(ctx context.Context, rawURL string) (Tab, error) {
 		if err != nil {
 			return err
 		}
-		b.mu.Lock()
-		if b.pages != nil {
-			b.pages[p.TargetID] = p
-		}
-		b.mu.Unlock()
+		b.keep(ctx, p)
 		if err := conn.Call(ctx, "", "Target.activateTarget", map[string]any{"targetId": p.TargetID}, nil); err != nil {
 			return err
 		}
@@ -392,7 +487,7 @@ func (b *Browser) CloseTab(ctx context.Context, id string) error {
 // text. %d is the maximum text length. The numbers live in the isolated world:
 // the page can neither see them nor give them to other elements.
 const readPageJS = `(() => {
-  const maxText = %d;
+  const maxText = %d, maxTitle = %d, maxURL = %d, maxType = %d;
   const kivora = globalThis.kivora ??= {
     elements: new Map(),
     secrets: new WeakSet(),
@@ -410,9 +505,13 @@ const readPageJS = `(() => {
     '[contenteditable=true], [role=button], [role=link], [role=checkbox], [role=radio], [role=tab], ' +
     '[role=menuitem], [role=option], [role=switch], [role=combobox], [role=searchbox], [role=textbox]';
   const elements = [];
+  let more = false;
   for (const el of document.querySelectorAll(sel)) {
-    if (elements.length >= 400) break;
     if (!visible(el)) continue;
+    if (elements.length >= 400) {
+      more = true;
+      break;
+    }
     const id = elements.length + 1;
     kivora.elements.set(id, el);
     // Never return what is typed in a password field or a field filled
@@ -421,20 +520,27 @@ const readPageJS = `(() => {
     const value = hidden ? "" : el.value;
     const label = (el.getAttribute("aria-label") || el.innerText || value || el.placeholder ||
       el.title || el.alt || el.name || "").replace(/\s+/g, " ").trim().slice(0, 120);
-    elements.push({id, tag: el.tagName.toLowerCase(), type: el.getAttribute("type") || el.getAttribute("role") || "",
-      label, href: el.href && typeof el.href === "string" ? el.href : ""});
+    elements.push({id, tag: el.tagName.toLowerCase(), type: (el.getAttribute("type") || el.getAttribute("role") || "").slice(0, maxType),
+      label, href: el.href && typeof el.href === "string" ? el.href.slice(0, maxURL) : ""});
+  }
+  let shadow_roots = 0, seen = 0;
+  for (const el of document.querySelectorAll("*")) {
+    if (el.shadowRoot) shadow_roots++;
+    if (++seen >= 100000) break;
   }
   let text = (document.body ? document.body.innerText : "").replace(/[ \t]+/g, " ").replace(/\n\s*\n\s*\n+/g, "\n\n").trim();
   const truncated = text.length > maxText;
   if (truncated) text = text.slice(0, maxText);
-  return {title: document.title, url: location.href, text, truncated, elements};
+  return {title: document.title.slice(0, maxTitle), url: location.href.slice(0, maxURL), text, truncated, elements,
+    more_elements: more, frames: document.querySelectorAll("iframe, frame").length, shadow_roots};
 })()`
 
 // ReadPage returns the active tab's text and numbered interactive elements.
 func (b *Browser) ReadPage(ctx context.Context, maxChars int) (Page, error) {
 	var page Page
+	script := fmt.Sprintf(readPageJS, maxChars, maxTitle, maxURL, maxType)
 	err := b.withWebPage(ctx, func(p *cdp.Page) error {
-		return p.EvalIsolated(ctx, fmt.Sprintf(readPageJS, maxChars), &page)
+		return onPage(ctx, p, tabWorkTimeout, func(ctx context.Context) error { return p.EvalIsolated(ctx, script, &page) })
 	})
 	return page, err
 }
@@ -445,103 +551,217 @@ func (b *Browser) ReadPage(ctx context.Context, maxChars int) (Page, error) {
 func (b *Browser) withWebPage(ctx context.Context, fn func(*cdp.Page) error) error {
 	return b.withActive(ctx, func(_ *cdp.Conn, p *cdp.Page) error {
 		var href string
-		if err := p.EvalIsolated(ctx, "location.href", &href); err != nil {
+		if err := eval(ctx, p, fmt.Sprintf("location.href.slice(0, %d)", maxURL), &href); err != nil {
 			return err
 		}
 		if !isWebPage(href) {
-			return fmt.Errorf("refused: %s is not a web page", href)
+			return &ThirdPartyError{Message: "refused: the visible tab is not a web page; use browser_navigate or browser_new_tab, or computer_* to work with it. Its address", Detail: href}
 		}
 		return fn(p)
 	})
 }
 
-// isWebPage reports whether rawURL is a page from the web, or empty.
+// isWebPage reports whether rawURL is a page from the web, and not one served by
+// this computer, which only the keyboard can bring up. The browser policies block
+// what they know of; this holds for any way of writing the address.
 func isWebPage(rawURL string) bool {
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return false
 	}
 	switch u.Scheme {
-	case "http", "https", "data":
+	case "http", "https":
+		return !isThisComputer(u.Hostname())
+	case "data":
 		return true
 	case "about":
 		return u.Opaque == "blank" || u.Opaque == "srcdoc"
 	case "blob":
-		return strings.HasPrefix(u.Opaque, "http:") || strings.HasPrefix(u.Opaque, "https:")
+		inner, err := url.Parse(u.Opaque)
+		return err == nil && (inner.Scheme == "http" || inner.Scheme == "https") && !isThisComputer(inner.Hostname())
 	}
 	return false
 }
 
-const elementCenterJS = `(() => {
+// isThisComputer reports whether a URL's host reaches this computer, written in
+// any way a browser understands: a name, or an address in decimal, hexadecimal or
+// octal, whole or in parts, mapped to IPv6 or not.
+func isThisComputer(host string) bool {
+	if allowLocalPages {
+		return false
+	}
+	host = strings.ToLower(strings.TrimSuffix(host, "."))
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		ip = legacyIPv4(host)
+	}
+	return ip != nil && netguard.IsLocal(ip)
+}
+
+// legacyIPv4 reads the forms of an IPv4 address other than a.b.c.d, such as
+// 2130706433, 0x7f.1 or 017700000001. It returns nil for anything else.
+func legacyIPv4(host string) net.IP {
+	parts := strings.Split(host, ".")
+	if len(parts) > 4 {
+		return nil
+	}
+	var value uint64
+	for i, part := range parts {
+		n, err := strconv.ParseUint(part, 0, 32)
+		if err != nil || strings.Contains(part, "_") {
+			return nil
+		}
+		if i == len(parts)-1 {
+			// The last part fills every byte left.
+			if bits := 8 * uint(4-i); bits < 32 && n >= 1<<bits {
+				return nil
+			}
+			value |= n
+			break
+		}
+		if n > 255 {
+			return nil
+		}
+		value |= n << (24 - 8*uint(i))
+	}
+	return net.IPv4(byte(value>>24), byte(value>>16), byte(value>>8), byte(value))
+}
+
+// elementPointJS scrolls to an element and finds where a click reaches it: a
+// transparent layer over it would take the click instead, and the page would
+// decide what that does. A link over several lines has several boxes.
+const elementPointJS = `(() => {
   const el = globalThis.kivora?.get(%d);
   if (!el) return null;
   el.scrollIntoView({block: "center", inline: "center"});
-  const r = el.getBoundingClientRect();
-  return {x: r.left + r.width / 2, y: r.top + r.height / 2};
+  const reaches = (x, y) => {
+    const top = document.elementFromPoint(x, y);
+    return top && (top === el || el.contains(top) || top.contains(el) ||
+      [...(el.labels || [])].some(label => label === top || label.contains(top)));
+  };
+  for (const r of el.getClientRects()) {
+    const x = r.left + r.width / 2, y = r.top + r.height / 2;
+    if (r.width > 0 && r.height > 0 && reaches(x, y)) return {x, y, covered: false};
+  }
+  return {covered: true};
 })()`
 
 // ClickElement clicks an element numbered by the last ReadPage.
 func (b *Browser) ClickElement(ctx context.Context, id int) (Tab, error) {
-	err := b.withActive(ctx, func(_ *cdp.Conn, p *cdp.Page) error {
-		var pt *struct{ X, Y float64 }
-		if err := p.EvalIsolated(ctx, fmt.Sprintf(elementCenterJS, id), &pt); err != nil {
+	var switched bool
+	err := b.withActive(ctx, func(conn *cdp.Conn, p *cdp.Page) error {
+		var pt *struct {
+			X, Y    float64
+			Covered bool
+		}
+		if err := eval(ctx, p, fmt.Sprintf(elementPointJS, id), &pt); err != nil {
 			return err
 		}
 		if pt == nil {
 			return fmt.Errorf("element %d not found; call browser_read_page again, the page may have changed", id)
 		}
-		for _, ev := range []map[string]any{
-			{"type": "mouseMoved", "x": pt.X, "y": pt.Y},
-			{"type": "mousePressed", "x": pt.X, "y": pt.Y, "button": "left", "clickCount": 1},
-			{"type": "mouseReleased", "x": pt.X, "y": pt.Y, "button": "left", "clickCount": 1},
-		} {
-			if err := p.Call(ctx, "Input.dispatchMouseEvent", ev, nil); err != nil {
-				return err
+		if pt.Covered {
+			return fmt.Errorf("element %d is out of view or covered by something else, which would take the click: take a screenshot, and use computer_click if that is what you mean", id)
+		}
+		err := onPage(ctx, p, tabWorkTimeout, func(ctx context.Context) error {
+			for _, ev := range []map[string]any{
+				{"type": "mouseMoved", "x": pt.X, "y": pt.Y},
+				{"type": "mousePressed", "x": pt.X, "y": pt.Y, "button": "left", "clickCount": 1},
+				{"type": "mouseReleased", "x": pt.X, "y": pt.Y, "button": "left", "clickCount": 1},
+			} {
+				if err := p.Call(ctx, "Input.dispatchMouseEvent", ev, nil); err != nil {
+					return err
+				}
 			}
+			return nil
+		})
+		if err != nil {
+			return err
 		}
 		time.Sleep(300 * time.Millisecond)
-		return waitLoaded(ctx, p)
+		switched, err = b.settle(ctx, conn, p)
+		return err
 	})
 	if err != nil {
 		return Tab{}, err
 	}
-	return b.Current(ctx)
+	tab, err := b.Current(ctx)
+	tab.Switched = switched
+	return tab, err
 }
 
+// settle waits for what an action in tab p led to, which may be another tab or
+// window, and says if it was.
+func (b *Browser) settle(ctx context.Context, conn *cdp.Conn, p *cdp.Page) (switched bool, err error) {
+	now, err := b.active(ctx, conn)
+	if err != nil {
+		return false, err
+	}
+	return now.TargetID != p.TargetID, waitLoaded(ctx, now)
+}
+
+// focusJS gives an element the focus and says whether text can go there. Text
+// sent elsewhere goes nowhere, without any error. A frame or a shadow root may hold
+// the real field.
 const focusJS = `(() => {
+  const focused = () => {
+    let el = document.activeElement;
+    while (el?.shadowRoot?.activeElement) el = el.shadowRoot.activeElement;
+    return el;
+  };
+  const noText = ["button", "checkbox", "color", "file", "hidden", "image", "radio", "range", "reset", "submit"];
+  const takesText = el => el && !el.disabled && !el.readOnly && (el.isContentEditable || el.tagName === "TEXTAREA" ||
+    el.tagName === "IFRAME" || el.tagName === "FRAME" || (el.tagName === "INPUT" && !noText.includes(el.type)));
   const el = %s;
-  if (!el) return false;
+  if (!el) return "missing";
   el.scrollIntoView({block: "center"});
   el.focus();
+  const field = focused();
+  if (!takesText(field)) return "no field";
   if (%t) {
-    if (typeof el.select === "function") el.select();
+    if (typeof field.select === "function") field.select();
     else document.execCommand("selectAll");
   }
-  return true;
+  return "ok";
 })()`
 
 // Type inserts text into an element numbered by ReadPage, or into the
 // focused element when id is 0. clear replaces the current value; submit
 // presses Enter afterwards. Text of any script is inserted exactly.
 func (b *Browser) Type(ctx context.Context, id int, text string, clear, submit bool) (Tab, error) {
-	err := b.withActive(ctx, func(_ *cdp.Conn, p *cdp.Page) error {
+	if id < 0 {
+		return Tab{}, fmt.Errorf("element %d does not exist: use a number from browser_read_page, or none for the focused field", id)
+	}
+	var switched bool
+	err := b.withActive(ctx, func(conn *cdp.Conn, p *cdp.Page) error {
 		target := "document.activeElement"
 		if id > 0 {
 			target = fmt.Sprintf(`globalThis.kivora?.get(%d)`, id)
 		}
-		var ok bool
-		if err := p.EvalIsolated(ctx, fmt.Sprintf(focusJS, target, clear), &ok); err != nil {
+		var status string
+		if err := eval(ctx, p, fmt.Sprintf(focusJS, target, clear), &status); err != nil {
 			return err
 		}
-		if !ok {
+		switch {
+		case status == "missing" && id > 0:
 			return fmt.Errorf("element %d not found; call browser_read_page again", id)
+		case status != "ok" && id > 0:
+			return fmt.Errorf("element %d is not a field that takes text", id)
+		case status != "ok":
+			return errors.New("no field has the focus: give the number of one from browser_read_page")
 		}
-		if text != "" {
-			if err := p.Call(ctx, "Input.insertText", map[string]any{"text": text}, nil); err != nil {
-				return err
+		err := onPage(ctx, p, tabWorkTimeout, func(ctx context.Context) error {
+			if text != "" {
+				if err := p.Call(ctx, "Input.insertText", map[string]any{"text": text}, nil); err != nil {
+					return err
+				}
 			}
-		}
-		if submit {
+			if !submit {
+				return nil
+			}
 			for _, typ := range []string{"keyDown", "keyUp"} {
 				ev := map[string]any{"type": typ, "key": "Enter", "code": "Enter", "windowsVirtualKeyCode": 13, "nativeVirtualKeyCode": 13}
 				if typ == "keyDown" {
@@ -551,22 +771,28 @@ func (b *Browser) Type(ctx context.Context, id int, text string, clear, submit b
 					return err
 				}
 			}
-			time.Sleep(300 * time.Millisecond)
-			return waitLoaded(ctx, p)
+			return nil
+		})
+		if err != nil || !submit {
+			return err
 		}
-		return nil
+		time.Sleep(300 * time.Millisecond)
+		switched, err = b.settle(ctx, conn, p)
+		return err
 	})
 	if err != nil {
 		return Tab{}, err
 	}
-	return b.Current(ctx)
+	tab, err := b.Current(ctx)
+	tab.Switched = switched
+	return tab, err
 }
 
 const secretTargetJS = `(() => {
   const el = globalThis.kivora?.get(%d);
   if (!el) return {ok: false, why: "element not found; call browser_read_page again"};
   if (el.tagName !== "INPUT") return {ok: false, why: "element is not an input field"};
-  return {ok: true, url: location.href};
+  return {ok: true, url: location.href.slice(0, %d)};
 })()`
 
 // secretFillJS checks the origin and the field and fills it in one script, so
@@ -606,7 +832,7 @@ func (b *Browser) FillSecret(ctx context.Context, id int, valueFor func(pageURL 
 			Why string `json:"why"`
 			URL string `json:"url"`
 		}
-		if err := p.EvalIsolated(ctx, fmt.Sprintf(secretTargetJS, id), &res); err != nil {
+		if err := eval(ctx, p, fmt.Sprintf(secretTargetJS, id, maxURL), &res); err != nil {
 			return err
 		}
 		if !res.OK {
@@ -618,7 +844,7 @@ func (b *Browser) FillSecret(ctx context.Context, id int, valueFor func(pageURL 
 		}
 		var status string
 		script := fmt.Sprintf(secretFillJS, jsString(grant.Origin), id, jsString(grant.Field), jsString(grant.Value))
-		if err := p.EvalIsolated(ctx, script, &status); err != nil {
+		if err := eval(ctx, p, script, &status); err != nil {
 			return errors.New("could not fill the field") // never echo the script: it holds the value
 		}
 		switch status {
@@ -647,37 +873,47 @@ func (b *Browser) WaitForText(ctx context.Context, text string, timeout time.Dur
 	js := fmt.Sprintf(`document.body ? document.body.innerText.includes(%s) : false`, jsString(text))
 	for {
 		var found bool
-		err := b.withWebPage(ctx, func(p *cdp.Page) error { return p.EvalIsolated(ctx, js, &found) })
+		err := b.withWebPage(ctx, func(p *cdp.Page) error { return eval(ctx, p, js, &found) })
 		if err == nil && found {
 			return nil
 		}
 		select {
 		case <-ctx.Done():
+			if err != nil && !errors.Is(err, context.DeadlineExceeded) {
+				return fmt.Errorf("could not look for text %q: %w", text, err)
+			}
 			return fmt.Errorf("text %q did not appear within %v", text, timeout)
 		case <-time.After(250 * time.Millisecond):
 		}
 	}
 }
 
-// PDF prints the active tab to PDF.
-func (b *Browser) PDF(ctx context.Context) ([]byte, Tab, error) {
-	var data []byte
+// PDF prints the active tab to PDF. The result is read from the browser as it is
+// consumed: it can be larger than a single message of the protocol.
+func (b *Browser) PDF(ctx context.Context) (io.ReadCloser, Tab, error) {
+	var body io.ReadCloser
 	err := b.withWebPage(ctx, func(p *cdp.Page) error {
 		var res struct {
-			Data string `json:"data"`
+			Stream string `json:"stream"`
 		}
-		if err := p.Call(ctx, "Page.printToPDF", map[string]any{"printBackground": true}, &res); err != nil {
+		err := onPage(ctx, p, time.Minute, func(ctx context.Context) error {
+			return p.Call(ctx, "Page.printToPDF", map[string]any{"printBackground": true, "transferMode": "ReturnAsStream"}, &res)
+		})
+		if err != nil {
 			return err
 		}
-		var err error
-		data, err = base64.StdEncoding.DecodeString(res.Data)
-		return err
+		body = p.Stream(ctx, res.Stream)
+		return nil
 	})
 	if err != nil {
 		return nil, Tab{}, err
 	}
 	tab, err := b.Current(ctx)
-	return data, tab, err
+	if err != nil {
+		body.Close()
+		return nil, Tab{}, err
+	}
+	return body, tab, nil
 }
 
 // Download fetches rawURL with the browser's cookies and user agent, so that
@@ -718,11 +954,16 @@ func (b *Browser) Download(ctx context.Context, rawURL string, limit int64) (io.
 	}}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, "", err
+		if ctx.Err() != nil {
+			return nil, "", err
+		}
+		// The error can hold an address that a site redirected to.
+		return nil, "", &ThirdPartyError{Message: "download failed", Detail: err.Error()}
 	}
 	if resp.StatusCode != http.StatusOK {
 		resp.Body.Close()
-		return nil, "", fmt.Errorf("download %s: %s", u, resp.Status)
+		// The status code only: a site writes the rest of that line.
+		return nil, "", fmt.Errorf("download failed: the server answered %d %s", resp.StatusCode, http.StatusText(resp.StatusCode))
 	}
 	if resp.ContentLength > limit {
 		resp.Body.Close()
@@ -740,7 +981,12 @@ func (b *Browser) addCookies(ctx context.Context, req *http.Request) error {
 			Value string `json:"value"`
 		} `json:"cookies"`
 	}
-	err := b.withActive(ctx, func(_ *cdp.Conn, p *cdp.Page) error {
+	// The browser answers this itself, also for a tab showing a dialog.
+	err := b.retry(ctx, func(conn *cdp.Conn) error {
+		p, err := b.active(ctx, conn)
+		if err != nil {
+			return err
+		}
 		return p.Call(ctx, "Network.getCookies", map[string]any{"urls": []string{req.URL.String()}}, &res)
 	})
 	if err != nil {
@@ -775,13 +1021,26 @@ func suggestName(resp *http.Response, rawURL string) string {
 }
 
 // waitLoaded waits for the document to finish loading, up to 30 seconds.
-// Pages that keep loading forever are not an error: the content is usable.
+// Pages that keep loading forever are not an error: the content is usable. A page
+// showing a dialog or not answering at all is reported.
 func waitLoaded(ctx context.Context, p *cdp.Page) error {
 	deadline := time.Now().Add(30 * time.Second)
+	stuck := 0
 	for time.Now().Before(deadline) {
 		var state string
-		if err := p.EvalIsolated(ctx, "document.readyState", &state); err == nil && state == "complete" {
+		err := eval(ctx, p, "document.readyState", &state)
+		var site *ThirdPartyError
+		switch {
+		case err == nil && state == "complete":
 			return nil
+		case errors.As(err, &site):
+			return err
+		case errors.Is(err, ErrTabStuck):
+			if stuck++; stuck >= stuckProbes {
+				return err
+			}
+		default:
+			stuck = 0
 		}
 		select {
 		case <-ctx.Done():
@@ -807,6 +1066,9 @@ func checkURL(raw string) (string, error) {
 	}
 	if u.Scheme != "http" && u.Scheme != "https" {
 		return "", fmt.Errorf("only http and https URLs are allowed, not %s", u.Scheme)
+	}
+	if isThisComputer(u.Hostname()) {
+		return "", fmt.Errorf("refused: %s is an address of this computer", u.Hostname())
 	}
 	return u.String(), nil
 }

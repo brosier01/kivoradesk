@@ -58,3 +58,76 @@ func TestDownloadsNeverReachThisComputer(t *testing.T) {
 		}
 	}
 }
+
+func TestIsWebPageRefusesThisComputer(t *testing.T) {
+	for _, in := range []string{
+		"http://127.0.0.1:9222/json/list",
+		"http://localhost:680/",
+		"http://kivora.localhost:680/",
+		"http://[::1]:9222/",
+		"http://[::ffff:7f00:1]:9222/json/list",
+		"http://[::ffff:127.0.0.1]:9222/json/list",
+		"blob:http://localhost/1234",
+	} {
+		if isWebPage(in) {
+			t.Errorf("isWebPage(%q) = true", in)
+		}
+	}
+}
+
+func TestCheckURLRefusesThisComputer(t *testing.T) {
+	for _, raw := range []string{
+		"127.0.0.1:9222/json", "http://127.0.0.1:9222", "http://127.1:9222", "http://127.0.0.1.:9222",
+		"http://2130706433/", "http://0x7f000001/", "http://0x7f.1/", "http://017700000001/", "http://0177.0.0.1/",
+		"http://localhost/", "http://LOCALHOST:680/", "http://localhost.:680/", "http://kivora.localhost:680/",
+		"http://[::1]/", "http://[::ffff:127.0.0.1]:9222/", "http://[::ffff:7f00:1]:9222/", "http://0.0.0.0/", "http://0/", "http://[::]/",
+		"http://169.254.169.254/",
+	} {
+		if got, err := checkURL(raw); err == nil {
+			t.Errorf("checkURL(%q) = %q", raw, got)
+		} else if !strings.Contains(err.Error(), "this computer") {
+			t.Errorf("checkURL(%q): %v", raw, err)
+		}
+	}
+	for raw, want := range map[string]string{
+		"example.com":              "https://example.com",
+		"http://example.com/a?b=c": "http://example.com/a?b=c",
+		"about:blank":              "about:blank",
+		"https://1.1.1.1/":         "https://1.1.1.1/",
+		"https://16843009/":        "https://16843009/",
+	} {
+		if got, err := checkURL(raw); err != nil || got != want {
+			t.Errorf("checkURL(%q) = %q, %v", raw, got, err)
+		}
+	}
+}
+
+func TestLegacyIPv4(t *testing.T) {
+	for in, want := range map[string]string{
+		"2130706433":   "127.0.0.1",
+		"0x7f000001":   "127.0.0.1",
+		"017700000001": "127.0.0.1",
+		"127.1":        "127.0.0.1",
+		"127.0.1":      "127.0.0.1",
+		"0x7f.0.0.1":   "127.0.0.1",
+		"10.0.513":     "10.0.2.1",
+		"example.com":  "<nil>",
+		"1.2.3.4.5":    "<nil>",
+		"256.1":        "<nil>",
+		"1.2.3.256":    "<nil>",
+		"1_0":          "<nil>",
+	} {
+		if got := fmt.Sprint(legacyIPv4(in)); got != want {
+			t.Errorf("legacyIPv4(%q) = %s, want %s", in, got, want)
+		}
+	}
+}
+
+func TestCutKeepsWholeCharacters(t *testing.T) {
+	if got := cut("aé", 2); got != "a" {
+		t.Errorf("cut = %q", got)
+	}
+	if got := cut("abc", 3); got != "abc" {
+		t.Errorf("cut = %q", got)
+	}
+}

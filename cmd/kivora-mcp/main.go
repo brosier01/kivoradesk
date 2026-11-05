@@ -19,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/brosier01/kivoradesk/internal/audit"
@@ -76,27 +77,51 @@ func main() {
 		log.Fatal(err)
 	}
 	state := filepath.Join(home, ".local", "state", "kivora")
+	os.MkdirAll(state, 0o700)
 	auditClient := &audit.Client{Prefix: strings.Fields(*auditCmd)}
 	defer auditClient.Close()
 	auditing := &auditLog{sink: auditClient}
 	// Do not start without an audit log.
-	if err := auditing.record(newTrace(), "session_start", nil, nil, 0); err != nil {
-		log.Fatalf("audit log: %v", err)
+	if err := auditing.record(auditEntry{trace: newTrace(), tool: "session_start", args: "null"}); err != nil {
+		fmt.Fprintln(os.Stderr, noAuditMessage(err, dataDiskFull()))
+		os.Exit(1)
 	}
 
+	vault := &secrets.Client{Prefix: strings.Fields(*vaultCmd)}
 	s := &server{
 		ctl:   control.NewClient(*controlSocket),
 		desk:  &desktop.Desktop{Display: *display, Width: *width, Height: *height, ShotDir: filepath.Join(state, "tmp")},
 		br:    &browser.Browser{Endpoint: *cdpURL},
 		work:  &worker.Runner{Prefix: strings.Fields(*workerCmd)},
-		vault: &secrets.Client{Prefix: strings.Fields(*vaultCmd)},
+		vault: vault,
 		audit: auditing,
+		clean: vault.Scrub,
+		lock:  actionLock{path: filepath.Join(state, "action.lock")},
 	}
 	srv := mcp.NewServer(&mcp.Implementation{Name: "kivoradesk", Version: version}, &mcp.ServerOptions{Instructions: instructions})
 	s.register(srv)
-	if err := srv.Run(context.Background(), &mcp.StdioTransport{}); err != nil {
+	if err := srv.Run(context.Background(), &mcp.StdioTransport{MaxLineLength: maxRequest}); err != nil {
 		log.Fatal(err)
 	}
+}
+
+// maxRequest is the largest request the server reads. Above it, the connection is
+// lost: it leaves room for files_write to refuse a content over its limit with an
+// error.
+const maxRequest = 2*maxWriteContent + 1<<20
+
+// noAuditMessage says why no session can start, for the client's log.
+func noAuditMessage(err error, diskFull bool) string {
+	msg := fmt.Sprintf("kivora-mcp: no session can start, because the audit log cannot be written (%v).", err)
+	if diskFull {
+		msg += " The VM's data disk is full."
+	}
+	return msg + " The human can check with kivora doctor and free some space with kivora ssh."
+}
+
+func dataDiskFull() bool {
+	var st syscall.Statfs_t
+	return syscall.Statfs("/data", &st) == nil && st.Bavail == 0
 }
 
 // browserCloseMain closes Chromium through DevTools and waits for it to exit.
