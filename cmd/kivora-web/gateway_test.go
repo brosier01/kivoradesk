@@ -903,9 +903,15 @@ func TestStartRecordsTheState(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	startGateway(t, ctx, dir, newFakeVNC(t), io.Discard)
-	st, err := os.Stat(filepath.Join(dir, controlFile))
-	if err != nil || st.Size() != controlFileSize {
-		t.Fatalf("no room kept for the state: %v, %v", st, err)
+	// The port comes first: it answers before the state is written.
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		st, err := os.Stat(filepath.Join(dir, controlFile))
+		if err == nil && st.Size() == controlFileSize {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no room kept for the state: %v, %v", st, err)
+		}
 	}
 	// No state: paused, and it stays that way.
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
