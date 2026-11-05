@@ -187,5 +187,4 @@ i.addEventListener('input', () => fetch('/report', {method: 'POST', body: 'HOSTI
 const i = document.getElementById('q');
 i.addEventListener('input', () => fetch('/report', {method: 'POST', body: 'BANK:' + i.value}));
 </script>`
-
 )
