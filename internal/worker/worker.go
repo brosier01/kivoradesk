@@ -6,6 +6,9 @@
 // desktop behind the input lock. The desktop account invokes this package
 // through `doas -u worker kivora-mcp worker ...`; the helper side (Main) runs
 // as the worker.
+//
+// That account cannot signal the helper: to stop it, the desktop account closes
+// its standard input, and the helper ends itself and what it started.
 package worker
 
 import (
@@ -21,7 +24,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -29,12 +31,23 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// Root is the only directory the file operations accept.
-const Root = "/workspace"
+// Root is the only directory the file operations accept. A variable for the tests.
+var Root = "/workspace"
 
 // shellProxy is the only way out of the VM for shell commands, to the sites the
 // human allowed (cmd/kivora-proxy).
 const shellProxy = "http://127.0.0.1:3128"
+
+const (
+	// MaxWrite is the largest file WriteFile accepts.
+	MaxWrite = 64 << 20
+	// maxListed bounds a listing: its result goes into the agent's context.
+	maxListed = 5000
+	// stopGrace is how long a helper that was told to stop may take to do so.
+	stopGrace = 5 * time.Second
+	// cancelOnEOF makes the helper stop when its standard input closes.
+	cancelOnEOF = "-cancel-on-eof"
+)
 
 // ExecResult is the outcome of a shell command.
 type ExecResult struct {
@@ -50,6 +63,8 @@ type Entry struct {
 	Dir      bool      `json:"dir"`
 	Size     int64     `json:"size"`
 	Modified time.Time `json:"modified"`
+	// Truncated marks a last entry that stands for the ones not listed.
+	Truncated bool `json:"truncated,omitempty"`
 }
 
 // Runner is the desktop account's side: it starts the helper as the worker.
@@ -86,7 +101,10 @@ func (r *Runner) ReadFile(ctx context.Context, path string, max int) ([]byte, bo
 // WriteFile creates or replaces a workspace file, creating parent
 // directories.
 func (r *Runner) WriteFile(ctx context.Context, path string, data []byte) error {
-	_, err := r.helper(ctx, time.Minute, data, "write", "--", path)
+	if len(data) > MaxWrite {
+		return fmt.Errorf("%d bytes is more than the %d a file written this way can hold", len(data), MaxWrite)
+	}
+	_, err := r.helper(ctx, time.Minute, data, "write", "-size", fmt.Sprint(len(data)), "--", path)
 	return err
 }
 
@@ -106,15 +124,41 @@ func (r *Runner) Delete(ctx context.Context, path string) error {
 	return err
 }
 
+// helper runs one command of the helper. Its input stays open during the call:
+// closing it is the only way to stop a process of another account. A helper that
+// still does not stop is left behind, rather than holding the call.
 func (r *Runner) helper(ctx context.Context, timeout time.Duration, stdin []byte, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	argv := append(append([]string{}, r.Prefix...), args...)
-	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
-	cmd.Stdin = bytes.NewReader(stdin)
+	argv := append(append(append([]string{}, r.Prefix...), cancelOnEOF), args...)
+	cmd := exec.Command(argv[0], argv[1:]...)
+	cmd.WaitDelay = stopGrace
+	in, err := cmd.StdinPipe()
+	if err != nil {
+		return nil, err
+	}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
-	if err := cmd.Run(); err != nil {
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("worker helper: %w", err)
+	}
+	if len(stdin) > 0 {
+		go in.Write(stdin)
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case err = <-done:
+	case <-ctx.Done():
+		in.Close()
+		select {
+		case <-done:
+			return nil, fmt.Errorf("worker helper: %w", ctx.Err())
+		case <-time.After(stopGrace):
+			return nil, fmt.Errorf("worker helper: %w, and it does not stop", ctx.Err())
+		}
+	}
+	if err != nil {
 		if msg := strings.TrimSpace(stderr.String()); msg != "" {
 			return nil, errors.New(msg)
 		}
@@ -126,22 +170,41 @@ func (r *Runner) helper(ctx context.Context, timeout time.Duration, stdin []byte
 // Main is the helper's entry point, running as the worker account. It
 // prints results on stdout and errors on stderr.
 func Main(args []string) int {
+	// The desktop account cannot signal this process: it ends with its parent.
+	unix.Prctl(unix.PR_SET_PDEATHSIG, uintptr(unix.SIGKILL), 0, 0, 0)
+	cancelled := make(chan struct{})
+	watch := false
+	if len(args) > 0 && args[0] == cancelOnEOF {
+		watch = true
+		args = args[1:]
+	}
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: worker exec|read|write|list|delete ...")
+		fmt.Fprintln(os.Stderr, "usage: worker exec|read|write|list|delete|valid-json ...")
 		return 2
+	}
+	// The data to write comes first on the input, and then the same rule applies.
+	if watch && args[0] != "write" {
+		watchInput(cancelled)
+		if args[0] != "exec" {
+			stopWhen(cancelled)
+		}
 	}
 	var err error
 	switch args[0] {
 	case "exec":
-		err = mainExec(args[1:])
+		err = mainExec(args[1:], cancelled)
+	case "init":
+		err = mainInit(args[1:])
 	case "read":
 		err = mainRead(args[1:])
 	case "write":
-		err = mainWrite(args[1:])
+		err = mainWrite(args[1:], watch, cancelled)
 	case "list":
 		err = mainList(args[1:])
 	case "delete":
 		err = mainDelete(args[1:])
+	case "valid-json":
+		err = mainValidJSON(args[1:])
 	default:
 		err = fmt.Errorf("unknown worker command %q", args[0])
 	}
@@ -152,7 +215,24 @@ func Main(args []string) int {
 	return 0
 }
 
-func mainExec(args []string) error {
+// watchInput closes cancelled when the standard input ends.
+func watchInput(cancelled chan struct{}) {
+	go func() {
+		io.Copy(io.Discard, os.Stdin)
+		close(cancelled)
+	}()
+}
+
+// stopWhen ends the helper, whatever it is doing, when cancelled closes.
+func stopWhen(cancelled <-chan struct{}) {
+	go func() {
+		<-cancelled
+		fmt.Fprintln(os.Stderr, "cancelled")
+		os.Exit(1)
+	}()
+}
+
+func mainExec(args []string, cancelled <-chan struct{}) error {
 	fl := flag.NewFlagSet("exec", flag.ContinueOnError)
 	timeout := fl.Duration("timeout", time.Minute, "kill the command after this long")
 	maxOutput := fl.Int("max-output", 32<<10, "keep at most this many bytes of output")
@@ -165,7 +245,7 @@ func mainExec(args []string) error {
 	if err := applyLimits(); err != nil {
 		return fmt.Errorf("limit the command: %w", err)
 	}
-	res := runAt(Root, fl.Arg(0), *timeout, *maxOutput, true)
+	res := runAt(Root, fl.Arg(0), *timeout, *maxOutput, true, cancelled)
 	return json.NewEncoder(os.Stdout).Encode(res)
 }
 
@@ -192,27 +272,102 @@ func applyLimits() error {
 	return os.WriteFile("/proc/self/oom_score_adj", []byte("1000"), 0)
 }
 
-// isolate gives the command a PID namespace of its own: when the shell ends,
-// the kernel kills everything left in it, whatever a process did to detach
-// itself. Nothing the agent runs outlives its call. The user namespace is what
-// allows an unprivileged account to create it; the account stays the same.
+// isolate starts the command in namespaces of its own. The PID namespace kills
+// everything left in it when the shell ends, whatever a process did to detach
+// itself: nothing the agent runs outlives its call. With the IPC and mount
+// namespaces, neither do shared memory segments nor files in /tmp, /var/tmp and
+// /dev/shm. The user namespace is what allows an unprivileged account to create
+// them; the account stays the same. mainInit runs inside first, and takes back the
+// capabilities it needed.
 func isolate(attr *syscall.SysProcAttr) {
 	uid, gid := os.Getuid(), os.Getgid()
-	attr.Cloneflags = syscall.CLONE_NEWUSER | syscall.CLONE_NEWPID
+	attr.Cloneflags = syscall.CLONE_NEWUSER | syscall.CLONE_NEWPID | syscall.CLONE_NEWIPC | syscall.CLONE_NEWNS
 	attr.UidMappings = []syscall.SysProcIDMap{{ContainerID: uid, HostID: uid, Size: 1}}
 	attr.GidMappings = []syscall.SysProcIDMap{{ContainerID: gid, HostID: gid, Size: 1}}
 	attr.GidMappingsEnableSetgroups = false
-	// If the helper is killed, the shell goes too, and with it the namespace.
+	attr.AmbientCaps = []uintptr{unix.CAP_SYS_ADMIN, unix.CAP_SYS_RESOURCE, unix.CAP_SETPCAP}
+	// If the helper is killed, the shell goes too, and with it the namespaces.
 	// The signal is tied to the thread that starts the command.
 	attr.Pdeathsig = syscall.SIGKILL
 	runtime.LockOSThread()
 }
 
+// scratchDirs are the directories a command shares with the other accounts. In
+// its namespace they are empty, bounded, and gone with the call.
+var scratchDirs = []struct{ path, size string }{
+	{"/tmp", "512m"},
+	{"/var/tmp", "128m"},
+	{"/dev/shm", "256m"},
+}
+
+// mainInit runs as the first process of the namespaces of isolate, which it
+// prepares before becoming the shell. If anything fails, the command does not run.
+func mainInit(args []string) error {
+	if len(args) != 2 || args[0] != "--" {
+		return errors.New("usage: worker init -- COMMAND")
+	}
+	// Capabilities and the parent's death signal belong to a thread: the one that
+	// becomes the shell.
+	runtime.LockOSThread()
+	unix.Prctl(unix.PR_SET_PDEATHSIG, uintptr(unix.SIGKILL), 0, 0, 0)
+	if err := prepareNamespace(); err != nil {
+		return fmt.Errorf("isolate the command: %w", err)
+	}
+	return syscall.Exec("/bin/sh", []string{"/bin/sh", "-c", args[1]}, os.Environ())
+}
+
+func prepareNamespace() error {
+	if err := unix.Mount("", "/", "", unix.MS_REC|unix.MS_PRIVATE, ""); err != nil {
+		return fmt.Errorf("private mounts: %w", err)
+	}
+	for _, d := range scratchDirs {
+		options := "mode=1777,size=" + d.size
+		if err := unix.Mount("tmpfs", d.path, "tmpfs", unix.MS_NOSUID|unix.MS_NODEV, options); err != nil {
+			return fmt.Errorf("mount %s: %w", d.path, err)
+		}
+	}
+	// Each new user namespace would give the command capabilities again, which
+	// reach parts of the kernel it has no use for.
+	if err := os.WriteFile("/proc/sys/user/max_user_namespaces", []byte("0"), 0); err != nil {
+		return fmt.Errorf("user namespaces: %w", err)
+	}
+	return dropCapabilities()
+}
+
+// dropCapabilities leaves the thread with nothing to gain, even through exec.
+func dropCapabilities() error {
+	for c := uintptr(0); c <= unix.CAP_LAST_CAP; c++ {
+		if err := unix.Prctl(unix.PR_CAPBSET_DROP, c, 0, 0, 0); err != nil {
+			return fmt.Errorf("bounding set: %w", err)
+		}
+	}
+	if err := unix.Prctl(unix.PR_CAP_AMBIENT, unix.PR_CAP_AMBIENT_CLEAR_ALL, 0, 0, 0); err != nil {
+		return fmt.Errorf("ambient set: %w", err)
+	}
+	if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
+		return fmt.Errorf("no new privileges: %w", err)
+	}
+	var none [2]unix.CapUserData
+	if err := unix.Capset(&unix.CapUserHeader{Version: unix.LINUX_CAPABILITY_VERSION_3}, &none[0]); err != nil {
+		return fmt.Errorf("capabilities: %w", err)
+	}
+	return nil
+}
+
 // runAt executes command in dir, in its own process group, so that a timeout
 // kills everything it started, not just the shell.
-func runAt(dir, command string, timeout time.Duration, maxOutput int, isolated bool) ExecResult {
+func runAt(dir, command string, timeout time.Duration, maxOutput int, isolated bool, stop <-chan struct{}) ExecResult {
+	res := ExecResult{ExitCode: -1}
 	home, _ := os.UserHomeDir()
 	cmd := exec.Command("/bin/sh", "-c", command)
+	if isolated {
+		self, err := os.Executable()
+		if err != nil {
+			res.Output = err.Error()
+			return res
+		}
+		cmd = exec.Command(self, "worker", "init", "--", command)
+	}
 	cmd.Dir = dir
 	cmd.Env = []string{
 		"HOME=" + home, "PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin",
@@ -227,7 +382,6 @@ func runAt(dir, command string, timeout time.Duration, maxOutput int, isolated b
 	buf := &capped{max: maxOutput}
 	cmd.Stdout, cmd.Stderr = buf, buf
 
-	res := ExecResult{ExitCode: -1}
 	if err := cmd.Start(); err != nil {
 		res.Output = err.Error()
 		return res
@@ -236,6 +390,9 @@ func runAt(dir, command string, timeout time.Duration, maxOutput int, isolated b
 	go func() { done <- cmd.Wait() }()
 	select {
 	case <-done:
+	case <-stop:
+		syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		<-done
 	case <-time.After(timeout):
 		res.TimedOut = true
 		syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
@@ -303,6 +460,33 @@ func onePath(name string, args []string, fl *flag.FlagSet) (string, error) {
 	return resolve(fl.Arg(0))
 }
 
+// openRegular opens a file without waiting, and refuses what is not a regular
+// file. A command can leave a FIFO or a link to a device under any name, and
+// opening or reading those would never end.
+func openRegular(p string, flags int) (*os.File, error) {
+	f, err := os.OpenFile(p, flags|syscall.O_NONBLOCK, 0o660)
+	if errors.Is(err, syscall.ENXIO) { // a FIFO nobody reads
+		return nil, fmt.Errorf("%s is not a regular file", p)
+	}
+	if err != nil {
+		return nil, err
+	}
+	st, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	if st.IsDir() {
+		f.Close()
+		return nil, fmt.Errorf("%s is a directory", p)
+	}
+	if !st.Mode().IsRegular() {
+		f.Close()
+		return nil, fmt.Errorf("%s is not a regular file", p)
+	}
+	return f, nil
+}
+
 func mainRead(args []string) error {
 	fl := flag.NewFlagSet("read", flag.ContinueOnError)
 	max := fl.Int64("max", 1<<20, "read at most this many bytes")
@@ -310,34 +494,71 @@ func mainRead(args []string) error {
 	if err != nil {
 		return err
 	}
-	f, err := os.Open(p)
+	f, err := openRegular(p, os.O_RDONLY)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-	if st, err := f.Stat(); err == nil && st.IsDir() {
-		return fmt.Errorf("%s is a directory", p)
-	}
 	_, err = io.Copy(os.Stdout, io.LimitReader(f, *max))
 	return err
 }
 
-func mainWrite(args []string) error {
-	p, err := onePath("write", args, flag.NewFlagSet("write", flag.ContinueOnError))
+// mainWrite reads the whole file before touching anything: an input that ends
+// early, as when the caller gives up, writes nothing.
+func mainWrite(args []string, watch bool, cancelled chan struct{}) error {
+	fl := flag.NewFlagSet("write", flag.ContinueOnError)
+	size := fl.Int64("size", -1, "bytes to read from the standard input; -1 to read it to its end")
+	p, err := onePath("write", args, fl)
 	if err != nil {
 		return err
 	}
 	if p == Root {
 		return errors.New("cannot write the workspace itself")
 	}
-	if err := os.MkdirAll(filepath.Dir(p), 0o770); err != nil {
-		return err
-	}
-	data, err := io.ReadAll(io.LimitReader(os.Stdin, 64<<20))
+	data, err := readInput(os.Stdin, *size)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(p, data, 0o660)
+	if watch {
+		watchInput(cancelled)
+		stopWhen(cancelled)
+	}
+	if err := os.MkdirAll(filepath.Dir(p), 0o770); err != nil {
+		return err
+	}
+	f, err := openRegular(p, os.O_WRONLY|os.O_CREATE)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if err := f.Truncate(0); err != nil {
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		return err
+	}
+	return f.Close()
+}
+
+func readInput(r io.Reader, size int64) ([]byte, error) {
+	if size > MaxWrite {
+		return nil, fmt.Errorf("%d bytes is more than the %d a file written this way can hold", size, MaxWrite)
+	}
+	if size >= 0 {
+		data := make([]byte, size)
+		if _, err := io.ReadFull(r, data); err != nil {
+			return nil, fmt.Errorf("the file was not sent in full: %w", err)
+		}
+		return data, nil
+	}
+	data, err := io.ReadAll(io.LimitReader(r, MaxWrite+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > MaxWrite {
+		return nil, fmt.Errorf("more than the %d bytes a file written this way can hold", MaxWrite)
+	}
+	return data, nil
 }
 
 func mainList(args []string) error {
@@ -345,20 +566,49 @@ func mainList(args []string) error {
 	if err != nil {
 		return err
 	}
-	dirents, err := os.ReadDir(p)
+	entries, err := listDir(p, maxListed)
 	if err != nil {
 		return err
 	}
+	return json.NewEncoder(os.Stdout).Encode(entries)
+}
+
+// listDir returns the first max entries of a directory in name order, and a last
+// one that tells how many it left out.
+func listDir(p string, max int) ([]Entry, error) {
+	dirents, err := os.ReadDir(p)
+	if err != nil {
+		return nil, err
+	}
 	entries := []Entry{}
-	for _, d := range dirents {
+	for i, d := range dirents {
+		if i == max {
+			entries = append(entries, Entry{Name: fmt.Sprintf("[%d more entries not listed]", len(dirents)-max), Truncated: true})
+			break
+		}
 		info, err := d.Info()
 		if err != nil {
 			continue
 		}
 		entries = append(entries, Entry{Name: d.Name(), Dir: d.IsDir(), Size: info.Size(), Modified: info.ModTime().UTC()})
 	}
-	sort.Slice(entries, func(i, j int) bool { return entries[i].Name < entries[j].Name })
-	return json.NewEncoder(os.Stdout).Encode(entries)
+	return entries, nil
+}
+
+// mainValidJSON checks a file for kivora doctor: Chromium ignores a policy file
+// it cannot read, and the VM has no other JSON parser.
+func mainValidJSON(args []string) error {
+	if len(args) != 1 {
+		return errors.New("valid-json takes exactly one path")
+	}
+	data, err := os.ReadFile(args[0])
+	if err != nil {
+		return err
+	}
+	if !json.Valid(data) {
+		return fmt.Errorf("%s is not valid JSON", args[0])
+	}
+	return nil
 }
 
 func mainDelete(args []string) error {
