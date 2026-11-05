@@ -45,9 +45,10 @@ Laptop                              Server (Linux x86_64, KVM)
 
 **The server** hosts the VM. It needs Linux on x86_64 with KVM (a cloud server must
 expose it), Docker Engine 25 or later with Compose v2, 2 vCPU, 4 GiB of memory for the
-VM and up to 32 GiB of disk, plus the backups. Tested on Ubuntu 24.04, Debian 13 and
-Fedora 44 with SELinux enforcing, with their own Docker packages, the oldest being
-Docker 26.1 and Compose 2.26. Not tested yet: a cloud server and rootless Docker.
+VM and up to 32 GiB of disk, plus the backups. Tested on Ubuntu 24.04 with Docker 29.1;
+an earlier state of this version also on Debian 13 and Fedora 44 with SELinux enforcing,
+with their own Docker packages, the oldest being Docker 26.1 and Compose 2.26. Not
+tested yet: a cloud server and rootless Docker.
 macOS, Windows, FreeBSD and ARM cannot host the VM for now.
 
 **Your laptop** drives it. It needs OpenSSH and an MCP client such as Claude Code. The
@@ -231,9 +232,9 @@ The MCP server avoids that limit: `computer_type` pastes non-ASCII text
 through the clipboard and `browser_type` inserts text through CDP.
 
 Resources: see the [benchmark](docs/benchmark.md). In short, measured on
-2026-11-01 with the former libvirt install, 2 vCPU and 4 GiB: 880 MiB of system
-disk, about 570 MiB of memory used at idle and 870 MiB with three real sites open,
-CPU near zero at idle, and 13 s from a reboot to working MCP tools.
+2026-11-05 in Docker on an idle server, with 2 vCPU and 4 GiB: 898 MiB of system
+disk, about 585 MiB of memory used at idle and 880 MiB with three real sites open,
+0.3 % of CPU at idle, and 13 s from a reboot to working MCP tools.
 
 ## Roadmap
 
@@ -508,8 +509,8 @@ browser does not resolve it (Safari may not), add `127.0.0.1 kivora.localhost` t
 
 ## Scenario suite
 
-`kivora-scenarios` measures how reliably complete workflows run (goal: at least
-90 % over 30 scenarios). It drives the real MCP server over SSH with
+`kivora-scenarios` measures how reliably complete workflows run and checks that the
+boundaries hold, over 41 scenarios (goal: at least 90 %). It drives the real MCP server over SSH with
 scripted tool sequences, so it measures the computer, not a model's
 reasoning:
 
@@ -522,6 +523,14 @@ reasoning:
 | Shell and files | pipeline, files round trip, timeout, worker isolation |
 | Human control | input lock, takeover request |
 | Persistence and faults | login kept across a browser restart, credentials, Chromium crash, Internet loss |
+| Pages | a hidden tab cannot pose as the visible one, a dialog or a busy page cannot hold the tools, a filled value stays hidden across sessions |
+| Commands | a FIFO cannot hold the session, nothing outlives the call, no new namespace, their text stays out of the system log |
+| Laptop | its key opens no shell, and works for MCP, file transfers and the tunnel |
+| `-destructive` | backup retention, `kivora recover` during a takeover, a damaged data disk is repaired |
+
+Without `-admin`, 30 of them run. `-admin` adds 8, and `-destructive` the last 3, once
+each, since they restart the VM or damage its data disk: use it on a disposable
+instance only. A scenario that cannot conclude says `skip`, and counts neither way.
 
 Run it on the server, in this directory, with the server set up as a
 [laptop](#on-your-laptop) and the live view tunnel open. Building it needs Go 1.27.3,
@@ -535,8 +544,9 @@ bin/kivora-scenarios -mcp "ssh -o ClearAllForwardings=yes -T kivoradesk /usr/loc
   -admin "docker compose exec -T kivoradesk kivora" -runs 10
 ```
 
-Result on 2026-11-05 (Alpine 3.24, 2 vCPU, 4 GiB, in Docker): **300/300
-runs passed (100 %)**, 10 runs per scenario. Without Internet, navigation
+Result on 2026-11-05 (Alpine 3.24, Chromium 156, 2 vCPU, 4 GiB, in Docker, from a
+clean clone): **380/380 runs passed (100 %)**, 10 runs of each of the 38 scenarios
+with `-admin`, and the 3 of `-destructive` passed. Without Internet, navigation
 fails with an explicit error, at once or after its 45-second timeout.
 
 ## Benchmark

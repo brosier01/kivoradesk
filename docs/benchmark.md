@@ -1,9 +1,37 @@
 # KivoraDesk benchmark
 
+## The Docker install
+
+Measured on 2026-11-05 with `kivora-bench`, one run, on an idle server (same host as
+below), from a clean clone of 0.4.0: Chromium 156, 2 vCPU, 4 GiB.
+
+| Measure | Value |
+|---|---:|
+| Reboot to working MCP tools | 13.4 s |
+| Browser ready (uptime) | 4.8 s |
+| System disk | 898 MiB, 321 packages |
+| Memory at idle | 585 MiB |
+| Memory with 3 sites open | 879 MiB |
+| CPU at idle | 0.30 % |
+
+| Tool | p50 ms | p95 ms |
+|---|---:|---:|
+| `computer_get_state` | 9.2 | 13.4 |
+| `computer_screenshot` | 52.4 | 56.9 |
+| `computer_click` | 68.5 | 69.0 |
+| `computer_key` | 49.0 | 49.8 |
+| `computer_type`, ASCII (20 characters) | 271.2 | 273.4 |
+| `computer_type`, accented (20 characters) | 789.8 | 813.8 |
+| `browser_navigate` example.com | 42.4 | 51.3 |
+| `browser_read_page` | 7.6 | 10.4 |
+| `shell_run` `true` | 8.6 | 19.0 |
+| `files_write` + `files_read` | 10.8 | 11.8 |
+
+## How it got there
+
 Measured on 2026-11-01 with `kivora-bench`, on the libvirt install KivoraDesk had
 then. Each change was measured on its own, after the previous ones (A/B), then all
-together. The Docker install has another network and has not been measured on an idle
-server yet: take the times and latencies below as an order of magnitude.
+together.
 
 ## Setup
 
