@@ -8,12 +8,14 @@
 //
 // Run as its account, it also manages sign-in, without the gateway restarting:
 //
-//	kivora-web login-code   print a sign-in code: works once, for 5 minutes
-//	kivora-web session      print a new session, for tests
-//	kivora-web sign-out     end every session
+//	kivora-web login-code    print a sign-in code: works once, for 5 minutes
+//	kivora-web session       print a new session, for tests
+//	kivora-web sign-out      end every session
+//	kivora-web init-control  give the agent control on a new data disk
 package main
 
 import (
+	"bytes"
 	"context"
 	"embed"
 	"encoding/json"
@@ -30,6 +32,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -45,11 +48,44 @@ const cookieName = "kivora_session"
 
 const defaultStateDir = "/var/lib/kivora-web"
 
+const (
+	controlFile = "control.json"
+	// The state is padded to this size and rewritten in place: once the file
+	// exists, recording a change needs no free block, so a full disk cannot make
+	// a restart resume from an older owner.
+	controlFileSize = 4096
+
+	// Enough for a few browsers: each one costs a connection to the VNC server.
+	maxViewers = 16
+	// A VNC server that stopped reading must not hold a change of owner, which
+	// waits for held keys to be released.
+	vncWriteTimeout = 5 * time.Second
+	pruneInterval   = time.Hour
+)
+
 type server struct {
 	sessions *sessionStore
 	vncAddr  string
 	state    *control.State
 	log      *slog.Logger
+
+	handshakeTimeout time.Duration
+	// How long a viewer may stay connected once its session has ended.
+	sessionCheckInterval time.Duration
+
+	viewerCount atomic.Int32
+	viewers     sync.WaitGroup
+	// stopping closes when the gateway stops: viewers let go of what they hold.
+	stopping chan struct{}
+}
+
+func newServer(sessions *sessionStore, vncAddr string, state *control.State, log *slog.Logger) *server {
+	return &server{
+		sessions: sessions, vncAddr: vncAddr, state: state, log: log,
+		handshakeTimeout:     10 * time.Second,
+		sessionCheckInterval: 2 * time.Second,
+		stopping:             make(chan struct{}),
+	}
 }
 
 func main() {
@@ -68,7 +104,9 @@ func main() {
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	if err := run(*listen, *vncAddr, *novnc, *stateDir, *controlSocket, log); err != nil {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := run(ctx, *listen, *vncAddr, *novnc, *stateDir, *controlSocket, log); err != nil {
 		log.Error("fatal", "err", err)
 		os.Exit(1)
 	}
@@ -77,7 +115,7 @@ func main() {
 // admin runs the commands managing sign-in.
 func admin(sessions *sessionStore, args []string) error {
 	if len(args) != 1 {
-		return errors.New("usage: kivora-web login-code | session | sign-out")
+		return errors.New("usage: kivora-web login-code | session | sign-out | init-control")
 	}
 	var kind string
 	switch args[0] {
@@ -87,6 +125,8 @@ func admin(sessions *sessionStore, args []string) error {
 		kind = sessionsDir
 	case "sign-out":
 		return sessions.signOutAll()
+	case "init-control":
+		return initControl(filepath.Join(sessions.dir, controlFile))
 	default:
 		return fmt.Errorf("unknown command %q", args[0])
 	}
@@ -98,20 +138,31 @@ func admin(sessions *sessionStore, args []string) error {
 	return nil
 }
 
-func run(listen, vncAddr, novnc, stateDir, controlSocket string, log *slog.Logger) error {
+func run(ctx context.Context, listen, vncAddr, novnc, stateDir, controlSocket string, log *slog.Logger) error {
+	// First: without the port, this instance must not disturb the one that has it.
+	web, err := net.Listen("tcp", listen)
+	if err != nil {
+		return err
+	}
 	// The permanent token of older versions must stop working.
 	os.Remove(filepath.Join(stateDir, "token"))
 	sessions := &sessionStore{dir: stateDir}
 	sessions.prune()
-	controlFile := filepath.Join(stateDir, "control.json")
-	s := &server{sessions: sessions, vncAddr: vncAddr, state: loadControl(controlFile, log), log: log}
+	path := filepath.Join(stateDir, controlFile)
+	s := newServer(sessions, vncAddr, loadControl(path, log), log)
+	if err := saveControl(path, s.state.Get()); err != nil {
+		log.Error("save control state", "err", err)
+	}
 	var saving sync.Mutex
-	s.state.OnChange(func(control.Snapshot) {
+	s.state.Persist(func(control.Snapshot) {
 		// The latest state, whatever the order of concurrent changes.
 		saving.Lock()
 		defer saving.Unlock()
-		if err := saveControl(controlFile, s.state.Get()); err != nil {
+		if err := saveControl(path, s.state.Get()); err != nil {
 			log.Error("save control state", "err", err)
+			// A restart must not resume from an older owner: without a file, it
+			// starts paused.
+			os.Remove(path)
 		}
 	})
 
@@ -119,11 +170,7 @@ func run(listen, vncAddr, novnc, stateDir, controlSocket string, log *slog.Logge
 	if err != nil {
 		return err
 	}
-	srv := &http.Server{
-		Addr:              listen,
-		Handler:           s.routes(static, novnc),
-		ReadHeaderTimeout: 10 * time.Second,
-	}
+	srv := newWebServer(s.routes(static, novnc))
 	// The agent's control API: group-accessible socket, so only accounts in
 	// the gateway's group (the desktop user) can reach it.
 	os.Remove(controlSocket)
@@ -134,24 +181,68 @@ func run(listen, vncAddr, novnc, stateDir, controlSocket string, log *slog.Logge
 	if err := os.Chmod(controlSocket, 0o660); err != nil {
 		return err
 	}
-	agentSrv := &http.Server{Handler: control.AgentHandler(s.state), ReadHeaderTimeout: 10 * time.Second}
+	// No limit on writing: a wait holds its answer for minutes.
+	agentSrv := &http.Server{
+		Handler:           control.AgentHandler(s.state),
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		IdleTimeout:       2 * time.Minute,
+	}
 	go agentSrv.Serve(ln)
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 	go func() {
+		ticker := time.NewTicker(pruneInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				sessions.prune()
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
 		<-ctx.Done()
 		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
+		close(s.stopping)
 		agentSrv.Close() // waiters hold long requests; do not wait for them
 		srv.Shutdown(shutdown)
+		// Shutdown does not wait for WebSockets, and the viewers still have to
+		// release what they hold.
+		viewers := make(chan struct{})
+		go func() {
+			s.viewers.Wait()
+			close(viewers)
+		}()
+		select {
+		case <-viewers:
+		case <-shutdown.Done():
+		}
 	}()
 
 	log.Info("listening", "addr", listen, "vnc", vncAddr, "control", controlSocket)
-	if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+	if err := srv.Serve(web); !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
+	<-stopped
 	return nil
+}
+
+// newWebServer limits ordinary requests. A WebSocket is hijacked, which clears
+// these deadlines.
+func newWebServer(h http.Handler) *http.Server {
+	return &http.Server{
+		Handler:           h,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      time.Minute,
+		IdleTimeout:       2 * time.Minute,
+	}
 }
 
 func (s *server) routes(static fs.FS, novnc string) http.Handler {
@@ -159,10 +250,14 @@ func (s *server) routes(static fs.FS, novnc string) http.Handler {
 	mux.Handle("GET /{$}", s.page(static))
 	mux.HandleFunc("GET /login", s.login)
 	mux.Handle("GET /ui/", s.auth(http.StripPrefix("/ui/", noListing(http.FileServerFS(static)))))
-	// Only what the viewer loads from noVNC: not its own pages or its tests.
-	novncFiles := s.auth(http.StripPrefix("/novnc/", noListing(http.FileServer(http.Dir(novnc)))))
-	mux.Handle("GET /novnc/core/", novncFiles)
-	mux.Handle("GET /novnc/vendor/", novncFiles)
+	// Only what the viewer loads from noVNC: not its own pages or its tests. Each
+	// prefix has its own root: an encoded ".." goes through the routes, and must
+	// stay inside.
+	for _, dir := range []string{"core", "vendor"} {
+		prefix := "/novnc/" + dir + "/"
+		files := http.FileServer(http.Dir(filepath.Join(novnc, dir)))
+		mux.Handle("GET "+prefix, s.auth(http.StripPrefix(prefix, noListing(files))))
+	}
 	mux.Handle("GET /api/control", s.auth(http.HandlerFunc(s.getControl)))
 	mux.Handle("POST /api/control", s.auth(http.HandlerFunc(s.setControl)))
 	mux.Handle("GET /websockify", s.auth(http.HandlerFunc(s.websockify)))
@@ -194,20 +289,17 @@ func secureHeaders(next http.Handler) http.Handler {
 }
 
 // loadControl resumes the input control state of the previous run, so that a
-// restart never hands the desktop to the agent behind the human's back. On the
-// very first start the agent owns the desktop; if the saved state cannot be
-// read, the agent is paused.
+// restart never hands the desktop to the agent behind the human's back. The agent
+// is paused if the state is missing or cannot be read: only a new data disk starts
+// with the agent in control (see initControl).
 func loadControl(path string, log *slog.Logger) *control.State {
 	b, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return control.New(control.Agent)
-	}
 	var saved control.Snapshot
 	if err == nil {
 		err = json.Unmarshal(b, &saved)
 	}
 	if err != nil {
-		log.Error("read control state, pausing the agent", "err", err)
+		log.Warn("no control state to resume, pausing the agent", "err", err)
 		return control.New(control.Paused)
 	}
 	return control.Restore(saved)
@@ -218,11 +310,33 @@ func saveControl(path string, snap control.Snapshot) error {
 	if err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+	if len(b) < controlFileSize {
+		b = append(b, bytes.Repeat([]byte{' '}, controlFileSize-len(b))...)
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE, 0o600)
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	defer f.Close()
+	if _, err := f.WriteAt(b, 0); err != nil {
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		return err
+	}
+	return f.Close()
+}
+
+// initControl gives the agent control on a new data disk. It does nothing if a
+// state exists, whatever it says: only the human gives control back.
+func initControl(path string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return saveControl(path, control.New(control.Agent).Get())
 }
 
 // checkHost rejects requests whose Host is not a loopback name, which defeats
@@ -257,16 +371,23 @@ func (s *server) auth(next http.Handler) http.Handler {
 	})
 }
 
-// login trades a sign-in code for a session, in a strict same-site cookie, and
-// redirects to a clean URL.
+// login trades a sign-in code for a session, in a strict same-site cookie. The
+// code is only used up once the session exists, and a preview tool asking for the
+// headers does not use it up.
 func (s *server) login(w http.ResponseWriter, r *http.Request) {
-	if s.authorized(r) {
-		http.Redirect(w, r, "/", http.StatusSeeOther)
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if !s.sessions.redeem(r.URL.Query().Get("code")) {
-		w.WriteHeader(http.StatusUnauthorized)
-		io.WriteString(w, "This sign-in link is invalid, expired or already used. Get a new one on the server with: kivora web-url.\n")
+	code := r.URL.Query().Get("code")
+	if s.authorized(r) {
+		s.sessions.redeem(code) // the link works once, whoever opens it
+		signedIn(w)
+		return
+	}
+	if !s.sessions.pending(code) {
+		invalidLink(w)
 		return
 	}
 	session, err := s.sessions.issue(sessionsDir)
@@ -275,13 +396,38 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "could not create a session", http.StatusInternalServerError)
 		return
 	}
+	if !s.sessions.redeem(code) { // another request was first
+		s.sessions.revoke(session)
+		invalidLink(w)
+		return
+	}
 	http.SetCookie(w, &http.Cookie{
 		Name: cookieName, Value: session, Path: "/",
 		HttpOnly: true, SameSite: http.SameSiteStrictMode,
 		MaxAge: int(sessionTTL.Seconds()),
 	})
 	s.log.Info("signed in", "remote", r.RemoteAddr)
-	http.Redirect(w, r, "/", http.StatusSeeOther)
+	signedIn(w)
+}
+
+func invalidLink(w http.ResponseWriter) {
+	w.WriteHeader(http.StatusUnauthorized)
+	io.WriteString(w, "This sign-in link is invalid, expired or already used. Get a new one on the server with: kivora web-url.\n")
+}
+
+// signedIn answers with a page that moves to the viewer, not with a redirect. A
+// link opened from another site carries that site through its redirects, and a
+// strict cookie is not sent then. From this page, the browser comes from this site.
+func signedIn(w http.ResponseWriter) {
+	h := w.Header()
+	h.Set("Content-Type", "text/html; charset=utf-8")
+	h.Set("Cache-Control", "no-store")
+	io.WriteString(w, `<!doctype html>
+<meta charset="utf-8">
+<meta http-equiv="refresh" content="0; url=/">
+<title>KivoraDesk</title>
+<p>Signed in. <a href="/">Open the live view</a>.</p>
+`)
 }
 
 // page serves the viewer.
@@ -323,11 +469,24 @@ func (s *server) setControl(w http.ResponseWriter, r *http.Request) {
 }
 
 // websockify relays a noVNC connection to the VNC server through the input
-// filter.
+// filter, as long as its session lasts.
 func (s *server) websockify(w http.ResponseWriter, r *http.Request) {
+	if !sameOrigin(r) {
+		http.Error(w, "cross-origin request", http.StatusForbidden)
+		return
+	}
+	if s.viewerCount.Add(1) > maxViewers {
+		s.viewerCount.Add(-1)
+		http.Error(w, "too many viewers", http.StatusServiceUnavailable)
+		return
+	}
+	defer s.viewerCount.Add(-1)
+	s.viewers.Add(1)
+	defer s.viewers.Done()
+
 	ws, err := websocket.Accept(w, r, &websocket.AcceptOptions{Subprotocols: []string{"binary"}})
 	if err != nil {
-		return // Accept already replied, including for cross-origin requests
+		return // Accept already replied
 	}
 	defer ws.CloseNow()
 
@@ -342,10 +501,17 @@ func (s *server) websockify(w http.ResponseWriter, r *http.Request) {
 	defer vnc.Close()
 	client := websocket.NetConn(ctx, ws, websocket.MessageBinary)
 
-	filter := rfb.NewFilter(vnc, func() bool { return s.state.Is(control.Human) })
+	var leaving atomic.Bool
+	filter := rfb.NewFilter(deadlineWriter{vnc, vncWriteTimeout}, func() bool {
+		return !leaving.Load() && s.state.Is(control.Human)
+	})
 	stop := s.state.OnChange(func(snap control.Snapshot) {
 		if snap.Owner != control.Human {
-			filter.Release()
+			if err := filter.Release(); err != nil {
+				// Only a new connection puts the two sides back in step.
+				s.log.Warn("release held input", "err", err)
+				vnc.Close()
+			}
 		}
 	})
 	defer stop()
@@ -357,14 +523,54 @@ func (s *server) websockify(w http.ResponseWriter, r *http.Request) {
 		done <- struct{}{}
 	}()
 	go func() {
-		if err := filter.Run(client); err != nil {
+		client.SetReadDeadline(time.Now().Add(s.handshakeTimeout))
+		err := filter.Handshake(client)
+		if err == nil {
+			client.SetReadDeadline(time.Time{})
+			err = filter.Forward(client)
+		}
+		if err != nil {
 			s.log.Warn("viewer stream", "err", err)
 		}
 		done <- struct{}{}
 	}()
-	<-done
+
+	s.waitForViewerEnd(r, done)
+	// In this order: nothing more gets through, then what is held is let go.
+	leaving.Store(true)
 	filter.Release()
 	s.log.Info("viewer disconnected", "remote", r.RemoteAddr)
+}
+
+// waitForViewerEnd returns when the viewer's connection ends, its session ends
+// (a sign-out comes from another process), or the gateway stops.
+func (s *server) waitForViewerEnd(r *http.Request, done <-chan struct{}) {
+	check := time.NewTicker(s.sessionCheckInterval)
+	defer check.Stop()
+	for {
+		select {
+		case <-done:
+			return
+		case <-s.stopping:
+			return
+		case <-check.C:
+			if !s.authorized(r) {
+				s.log.Info("session ended, closing its viewer", "remote", r.RemoteAddr)
+				return
+			}
+		}
+	}
+}
+
+// deadlineWriter bounds each write to a connection.
+type deadlineWriter struct {
+	conn    net.Conn
+	timeout time.Duration
+}
+
+func (d deadlineWriter) Write(p []byte) (int, error) {
+	d.conn.SetWriteDeadline(time.Now().Add(d.timeout))
+	return d.conn.Write(p)
 }
 
 // sameOrigin accepts requests without an Origin header (non-browser clients)

@@ -19,8 +19,8 @@ func TestControlStateAcrossRestarts(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	path := filepath.Join(t.TempDir(), "control.json")
 
-	if got := loadControl(path, log).Get().Owner; got != control.Agent {
-		t.Fatalf("first start: owner = %s, want agent", got)
+	if got := loadControl(path, log).Get().Owner; got != control.Paused {
+		t.Fatalf("no state: owner = %s, want paused", got)
 	}
 
 	state := control.New(control.Agent)
@@ -80,6 +80,12 @@ func TestRoutesServeOnlyWhatTheViewerNeeds(t *testing.T) {
 		{"/novnc/vnc.html", true, "localhost:6080", 404},
 		{"/novnc/tests/x.js", true, "localhost:6080", 404},
 		{"/novnc/core/", true, "localhost:6080", 404},
+		{"/novnc/core/..%2fvnc.html", true, "localhost:6080", 404},
+		{"/novnc/core/%2e%2e/vnc.html", true, "localhost:6080", 404},
+		{"/novnc/core/%2e%2e%2ftests/x.js", true, "localhost:6080", 404},
+		{"/novnc/vendor/..%2fvnc.html", true, "localhost:6080", 404},
+		{"/novnc/vendor/..%2fcore/rfb.js", true, "localhost:6080", 404},
+		{"/novnc/core/..%2f..%2f..%2fetc/passwd", true, "localhost:6080", 404},
 		{"/ui/", true, "localhost:6080", 404},
 		{"/", true, "evil.example", 403},
 	} {
@@ -106,11 +112,8 @@ func TestRoutesServeOnlyWhatTheViewerNeeds(t *testing.T) {
 
 func testServer(t *testing.T) *server {
 	t.Helper()
-	return &server{
-		sessions: &sessionStore{dir: t.TempDir()},
-		state:    control.New(control.Agent),
-		log:      slog.New(slog.NewTextHandler(io.Discard, nil)),
-	}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	return newServer(&sessionStore{dir: t.TempDir()}, "", control.New(control.Agent), log)
 }
 
 func TestSignInLinkWorksOnce(t *testing.T) {
@@ -132,8 +135,11 @@ func TestSignInLinkWorksOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	w := get("/login?code="+code, "")
-	if w.Code != http.StatusSeeOther || w.Header().Get("Location") != "/" {
-		t.Fatalf("sign-in = %d, %v", w.Code, w.Header())
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `http-equiv="refresh" content="0; url=/"`) {
+		t.Fatalf("sign-in = %d, %q", w.Code, w.Body)
+	}
+	if strings.Contains(w.Body.String(), code) || w.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("sign-in page: %q, %v", w.Body, w.Header())
 	}
 	cookies := w.Result().Cookies()
 	if len(cookies) != 1 || cookies[0].Name != cookieName || !cookies[0].HttpOnly || cookies[0].SameSite != http.SameSiteStrictMode {
