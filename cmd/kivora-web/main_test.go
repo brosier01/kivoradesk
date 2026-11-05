@@ -19,8 +19,8 @@ func TestControlStateAcrossRestarts(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	path := filepath.Join(t.TempDir(), "control.json")
 
-	if got := loadControl(path, log).Get().Owner; got != control.Agent {
-		t.Fatalf("first start: owner = %s, want agent", got)
+	if got := loadControl(path, log).Get().Owner; got != control.Paused {
+		t.Fatalf("no state: owner = %s, want paused", got)
 	}
 
 	state := control.New(control.Agent)
@@ -112,11 +112,8 @@ func TestRoutesServeOnlyWhatTheViewerNeeds(t *testing.T) {
 
 func testServer(t *testing.T) *server {
 	t.Helper()
-	return &server{
-		sessions: &sessionStore{dir: t.TempDir()},
-		state:    control.New(control.Agent),
-		log:      slog.New(slog.NewTextHandler(io.Discard, nil)),
-	}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	return newServer(&sessionStore{dir: t.TempDir()}, "", control.New(control.Agent), log)
 }
 
 func TestSignInLinkWorksOnce(t *testing.T) {
