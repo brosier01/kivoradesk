@@ -12,11 +12,11 @@ KivoraDesk runs an Alpine Linux VM on your own server (QEMU/KVM, in a Docker
 container). Claude Code stays on your laptop and drives the VM through an MCP server reached
 over SSH. You can watch the desktop live and take over at any time.
 
-> **Status:** early development. Phases 0 to 4 are done: Claude Code on a
-> laptop drives the VM through the MCP server (web research, forms, PDFs,
-> shell, files, credentials) while the human watches and can take over, with
-> backups, recovery, a 30-scenario reliability suite at 100 % and a
-> published [benchmark](docs/benchmark.md).
+> **Status:** early development, first public release. Claude Code on a laptop
+> drives the VM through the MCP server (web research, forms, PDFs, shell, files,
+> credentials) while the human watches and can take over, with backups, recovery,
+> a 30-scenario reliability suite at 100 % and a published
+> [benchmark](docs/benchmark.md).
 
 ## How it works
 
@@ -224,7 +224,7 @@ minute.
 | 2 | MCP server: `computer`, `browser`, `shell`, `files`, `human`; agent/human lock; worker account | Done |
 | 3 | Robustness: fault recovery, timeouts, diagnostics, update/recover/reset, encrypted backups, audit retention, credentials, mobile view, network allowlist, scenario suite | Done |
 | 4 | Optimisation and published benchmarks | Done |
-| 5 | Installation guide and first public release | In progress |
+| 5 | Installation guide and first public release | Done |
 
 ## Repository layout
 
@@ -473,7 +473,7 @@ bin/kivora-scenarios -mcp "ssh -o ClearAllForwardings=yes -T kivoradesk /usr/loc
   -admin "docker compose exec -T kivoradesk kivora" -runs 10
 ```
 
-Result on 2026-11-01 (Alpine 3.24, Chromium 155, 2 vCPU, 4 GiB): **300/300
+Result on 2026-11-05 (Alpine 3.24, Chromium 155, 2 vCPU, 4 GiB, in Docker): **300/300
 runs passed (100 %)**, 10 runs per scenario. Without Internet, navigation
 fails with an explicit error, at once or after its 45-second timeout.
 

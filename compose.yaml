@@ -1,7 +1,7 @@
 x-build: &build
   context: .
   args:
-    VERSION: ${KIVORA_VERSION:-dev}
+    VERSION: ${KIVORA_VERSION:-v0.4.0}
 
 services:
   kivoradesk:

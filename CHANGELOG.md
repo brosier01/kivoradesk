@@ -5,6 +5,140 @@ All notable changes to KivoraDesk are documented here. The format follows
 [Semantic Versioning](https://semver.org/). Before 1.0, minor versions may
 break compatibility.
 
+## 0.4.0 - 2026-11-05
+
+First public release: an install reduced to `git clone` and `docker compose up`,
+tested on three Linux distributions, and firmer boundaries between the web, the
+agent and the server after an internal security audit.
+
+### Upgrading from 0.3.0
+
+The libvirt install is gone, along with `scripts/vm`. To keep your data, make a
+last backup with `scripts/vm/backup.sh` while you still have them, then bring it to
+the new install with `kivora import-passphrase`, `kivora import-backup` and
+`kivora restore --yes`. Laptops need their SSH setup again: see `kivora add-laptop`.
+
+### Added
+
+- **Docker install.** `docker compose up -d --wait` builds the image, creates the VM
+  inside the container and installs it. The server needs Docker and KVM, no longer
+  libvirt or Go. `git pull` and `docker compose up -d --build` update it, Alpine
+  packages included.
+- **The `kivora` command**, run through `docker compose exec`, covers everything on
+  the server: laptops, sign-in links, credentials, allowed sites and services,
+  backups, restore, recovery and diagnostics.
+- **`kivora add-laptop`** authorizes a laptop's key and prints its SSH setup, with the
+  VM's host key: the first connection asks nothing, and works without a terminal.
+- **Shell network.** Shell commands reach the Internet through `kivora-proxy` only:
+  HTTPS tunnels to the sites listed with `kivora shell-allow`. The list starts empty
+  and applies at once.
+- **Sign-in links.** `kivora web-url` gives a code that works once, for 5 minutes, and
+  opens a session of 30 days. `--rotate` signs out every browser.
+- `SECURITY.md`: how to report a vulnerability, what KivoraDesk protects and what it
+  does not.
+- A GitHub Actions workflow for the build, `go vet`, the unit tests and the image.
+  The VM tests need KVM and are not part of it.
+
+### Changed
+
+- **The VM's network** is a process, `kivora-net`, in which its frames end. It only
+  opens TCP connections to the Internet and answers DNS. There is no other UDP, no
+  ping and no IPv6. `kivora allow` exceptions are TCP only.
+- Shell commands have no other network than the proxy: files from the web go through
+  `browser_download`. Background jobs end with the call, and each call has limits on
+  processes, memory per process and file size.
+- The browser blocks local files, browser pages, the developer tools, extensions,
+  file dialogs, its own downloads, the password manager and the VM's local service
+  ports.
+- Each credential has a kind of field. Password credentials, the default, go into
+  password fields only; text ones also go into login, email and one-time code fields.
+  Search boxes and text areas are always refused.
+- The live view uses `kivora.localhost`, and the permanent token is gone.
+- `scp` runs as the worker and starts in `/workspace`.
+- A tab that does not answer, usually because of a dialog, gives an error after 3
+  seconds rather than holding every browser tool for 2 minutes.
+- `kivora-scenarios`, `kivora-bench` and the fault tests take the command that runs
+  the admin commands: `-admin` or `KIVORA_ADMIN`.
+
+### Removed
+
+- The libvirt install: `scripts/vm` and its network filter. Docker is the only one.
+
+### Security
+
+- **The container.** QEMU and the network run under their own account, without
+  capabilities, on a read-only root filesystem. The SSH keys, the backups and their
+  passphrase are out of their reach.
+- **The server's addresses.** The VM reaches no private network, and none of the
+  server's addresses, public ones included: a one-shot service reads them at each `up`.
+- **The server's disk.** The VM's console file and the container's logs are bounded.
+- **Credentials** belong to a `kivora-vault` account: the desktop account may only
+  list them and ask for one value at a time. Values filled in a session, and their
+  common encodings, are removed from the text of every result and error.
+- **The audit log** belongs to a `kivora-audit` account: the desktop account can add
+  entries, not read, change or delete them. A call that could not be logged says so,
+  and the MCP server does not start without its log.
+- **Local services.** The worker reaches no local address, VNC is reserved to the
+  gateway and DevTools to the agent and root. Each account only sees its own
+  processes, and the X cookie and typed text are off command lines.
+- **SSH.** The agent's keys are out of its reach in `/etc/ssh/authorized_keys`. The
+  VM's host key is created before its first boot, so the admin commands refuse any
+  other, and it survives `kivora recover`.
+- **Web content.** All third-party text is marked as untrusted with a random tag per
+  result, which the content cannot close. The scripts of the browser tools run in an
+  isolated world, out of the page's reach.
+- **`browser_download`** refuses the VM's own addresses, after name resolution and at
+  each redirect, where cookies are looked up again.
+- **Web gateway.** Every answer has the security headers, only the noVNC files the
+  viewer loads are served, and the VM only stores hashes of codes and sessions.
+- **Data.** A failed backup leaves no clear copy, and a restore refuses a disk naming
+  another file. The data disk is mounted without setuid programs or device files.
+- **Supply chain.** The Alpine image is checked against its signature, and the move
+  to Go 1.27.3 ends 17 known vulnerabilities reachable from the code.
+
+### Fixed
+
+- A navigation that timed out on a reused connection kept the tab from answering,
+  even once the network was back.
+- The input owner survives restarts: a crash, an update or a reboot no longer hands
+  the desktop back during a human takeover.
+- A malformed clipboard length from a signed-in viewer could take the gateway down.
+- Cleaning up after a failed download, the browser service and `provision.sh` no
+  longer follow links left in writable directories.
+- Chromium could exit on a new profile: the GPU shader disk cache is off.
+- `kivora-bench` could no longer reach the browser since the firewall reserved DevTools.
+
+### Measured
+
+- Scenario suite: 300/300 runs on an install from scratch, on Ubuntu 24.04. All the
+  integration tests pass, fault injection included.
+- From blank servers, with their distribution's Docker packages: 30/30 scenarios on
+  Debian 13 and on Fedora 44 with SELinux enforcing, with `kivora doctor` and
+  `kivora check-isolation` clean on each, and backup, restore, recovery, restart and
+  update.
+- A laptop on another machine, through a published port and through `ProxyJump`.
+- A real instance moved from libvirt to Docker, its files, keys, credentials and audit
+  log identical.
+- `govulncheck` finds no known vulnerabilities.
+
+### Known limitations
+
+- The server must run Linux on x86_64 with KVM and Docker. macOS, Windows, FreeBSD and
+  ARM cannot host the VM for now.
+- Without UDP, video calls in the VM's browser may fail (not tested).
+- `docker compose down -v` deletes the data and the backups: copy them out first.
+- The server's addresses are read at each `up`: a public address that changes in
+  between is only known at the next one.
+- The installation was tested on nested servers, not yet on a cloud server or with
+  rootless Docker, and the laptop steps from Linux, not yet from macOS. The live view
+  was tested over HTTP through the tunnel, not in a real browser, since the move to
+  Docker.
+- The browser is not limited to allowed sites: a page can still lead the agent to send
+  out what it reads. Screenshots cannot be cleaned of filled credentials.
+- A Chromium utility process that applies component updates keeps being stopped by its
+  sandbox. The browser survives it.
+- Closing the laptop still stops the agent; the VM, browser and files stay intact.
+
 ## 0.3.0 - 2026-11-01
 
 Optimization: a lighter VM that boots in half the time, with a published
