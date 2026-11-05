@@ -5,6 +5,16 @@ All notable changes to KivoraDesk are documented here. The format follows
 [Semantic Versioning](https://semver.org/). Before 1.0, minor versions may
 break compatibility.
 
+## 0.4.1 - 2026-11-05
+
+### Changed
+
+- **Shorter README.** The details moved to `docs/administration.md`,
+  `docs/architecture.md` and `docs/development.md`.
+- **The version comes from the git tags**: `v0.4.1` on a release,
+  `v0.4.1-3-gabc1234` after it, `dev` without git history. `KIVORA_VERSION` still
+  sets it.
+
 ## 0.4.0 - 2026-11-05
 
 First public release: an install reduced to `git clone` and `docker compose up`, and

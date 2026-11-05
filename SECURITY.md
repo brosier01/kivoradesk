@@ -65,7 +65,7 @@ A way around any of these is a vulnerability.
 - **Updates.** Nothing updates itself. Chromium reads hostile pages, and its package
   only moves with an update of KivoraDesk or your own `apk upgrade`; `kivora doctor`
   warns when the VM is behind. The container's QEMU and OpenSSH only move when its
-  image is rebuilt: see [Maintenance](README.md#maintenance).
+  image is rebuilt: see [Maintenance](docs/administration.md#maintenance).
 - **The VM's own resources.** There is no quota on `/workspace`, only a reserve of the
   data disk for the audit log, the credentials and the browser. A command can use the
   VM's memory while it runs, and can ask not to be the first killed. This can stop the
