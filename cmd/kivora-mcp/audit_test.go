@@ -23,6 +23,26 @@ func TestRedact(t *testing.T) {
 		`token ghp_aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789`:                                          "ghp_aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789",
 		`{"command":"curl -d '{\"password\": \"swordfish\"}'"}`:                                   "swordfish",
 		"-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXk\n-----END OPENSSH PRIVATE KEY-----": "b3BlbnNzaC1rZXk",
+		`{"command":"app --password swordfish -v"}`:                                               "swordfish",
+		`{"command":"app --token swordfish -v"}`:                                                  "swordfish",
+		`{"command":"app --password='my secret phrase' -v"}`:                                      "my secret phrase",
+		`{"command":"app --password=\"my secret phrase\" -v"}`:                                    "my secret phrase",
+		`{"command":"curl -u bob:swordfish https://x.example"}`:                                   "swordfish",
+		`{"command":"curl --user bob:swordfish https://x.example"}`:                               "swordfish",
+		`{"command":"mysql -pswordfish db"}`:                                                      "swordfish",
+		`{"command":"mysql -u root -p swordfish db"}`:                                             "swordfish",
+		`{"command":"sshpass -p swordfish ssh x"}`:                                                "swordfish",
+		`{"command":"openssl enc -k swordfish -in a"}`:                                            "swordfish",
+		`{"command":"openssl enc -pass pass:swordfish -in a"}`:                                    "swordfish",
+		`{"command":"echo swordfish | sudo -S id"}`:                                               "swordfish",
+		`{"command":"psql postgres://alice:swordfish@db/app"}`:                                    "swordfish",
+		`{"command":"redis-cli -u redis://:swordfish@db"}`:                                        "swordfish",
+		`{"command":"curl -H 'Authorization: Token swordfish' x"}`:                                "swordfish",
+		`{"command":"curl -H 'Cookie: session=swordfish; other=1' x"}`:                            "swordfish",
+		`{"command":"curl -H \"Cookie: session=swordfish\" x"}`:                                   "swordfish",
+		`{"url":"https://x.example/reset?code=123456&sid=abc"}`:                                   "123456",
+		`{"url":"https://x.example/?a=1&otp=654321"}`:                                             "654321",
+		`{"command":"echo eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abcdefghij"}`:                      "eyJzdWIiOiIxIn0",
 	}
 	for in, secret := range cases {
 		out := redact(in)
@@ -33,7 +53,8 @@ func TestRedact(t *testing.T) {
 			t.Errorf("redact(%q) = %q, no redaction marker", in, out)
 		}
 	}
-	for _, clean := range []string{`ls -la /workspace`, `{"url":"https://example.com/?q=tokens+in+python"}`, `curl https://example.com`} {
+	for _, clean := range []string{`ls -la /workspace`, `{"url":"https://example.com/?q=tokens+in+python"}`, `curl https://example.com`,
+		`mkdir -p /workspace/a`, `ssh -p 22 host`, `docker run -p 80:80 img`, `tar -czf a.tgz b`} {
 		if out := redact(clean); out != clean {
 			t.Errorf("redact(%q) = %q, want it unchanged", clean, out)
 		}
@@ -47,21 +68,22 @@ func (failingSink) Append([]byte) error { return errors.New("disk full") }
 func TestAuditRedactsAndStores(t *testing.T) {
 	dir := t.TempDir()
 	a := &auditLog{sink: &audit.Log{Dir: dir, Retention: 48 * time.Hour}}
-	if err := a.record("abcd1234", "shell_run", map[string]string{"command": "export TOKEN=topsecret"}, nil, time.Millisecond); err != nil {
+	entry := auditEntry{trace: "abcd1234", tool: "shell_run", args: auditArgs(map[string]string{"command": "export TOKEN=topsecret"}), took: time.Millisecond, notes: map[string]any{"origin": "https://a.example"}}
+	if err := a.record(entry); err != nil {
 		t.Fatal(err)
 	}
 	today, err := os.ReadFile(filepath.Join(dir, "audit-"+time.Now().UTC().Format("2006-01-02")+".jsonl"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(today), `"tool":"shell_run"`) || strings.Contains(string(today), "topsecret") {
+	if !strings.Contains(string(today), `"tool":"shell_run"`) || strings.Contains(string(today), "topsecret") || !strings.Contains(string(today), `"origin":"https://a.example"`) {
 		t.Fatalf("today's log = %s", today)
 	}
 }
 
 // A call that could not be logged says so, whether it worked or not.
 func TestToolResultsReportAuditFailures(t *testing.T) {
-	s := &server{audit: &auditLog{sink: failingSink{}}}
+	s := &server{audit: &auditLog{sink: failingSink{}}, clean: cleanerOf()}
 	srv := mcp.NewServer(&mcp.Implementation{Name: "test"}, nil)
 	add(srv, s, free, &mcp.Tool{Name: "ok", Description: "ok"}, func(context.Context, none) ([]mcp.Content, error) {
 		return text("done"), nil

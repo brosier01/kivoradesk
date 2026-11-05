@@ -1,13 +1,16 @@
 // Package cdp is a minimal Chrome DevTools Protocol client: one WebSocket
 // connection to the browser, request/response calls, and flattened sessions
-// for talking to individual targets. Events are ignored.
+// for talking to individual targets. Of the events, only JavaScript dialogs are
+// followed: they stop a page from answering anything else.
 package cdp
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"sync"
@@ -22,6 +25,7 @@ type Conn struct {
 	mu      sync.Mutex
 	nextID  int64
 	pending map[int64]chan response
+	pages   map[string]*Page // by session ID
 	err     error
 }
 
@@ -32,10 +36,15 @@ type request struct {
 	SessionID string `json:"sessionId,omitempty"`
 }
 
+// response is a message from the browser: the answer to a call or, without an
+// ID, an event.
 type response struct {
-	ID     int64           `json:"id"`
-	Result json.RawMessage `json:"result"`
-	Error  *Error          `json:"error"`
+	ID        int64           `json:"id"`
+	Result    json.RawMessage `json:"result"`
+	Error     *Error          `json:"error"`
+	Method    string          `json:"method"`
+	Params    json.RawMessage `json:"params"`
+	SessionID string          `json:"sessionId"`
 }
 
 // Error is a protocol-level error returned by the browser.
@@ -70,6 +79,39 @@ func BrowserURL(ctx context.Context, endpoint string) (string, error) {
 	return v.URL, nil
 }
 
+// Target describes a tab or another target of the browser.
+type Target struct {
+	ID    string `json:"id"`
+	Type  string `json:"type"`
+	Title string `json:"title"`
+	URL   string `json:"url"`
+}
+
+// maxTargetList bounds the answer of ListTargets: titles and addresses come from
+// web pages.
+const maxTargetList = 16 << 20
+
+// ListTargets returns the targets from an HTTP endpoint such as
+// http://127.0.0.1:9222. The browser sorts them by the time they were last shown,
+// whatever their pages do: of the tabs, the first is the one on screen, in the
+// window on top.
+func ListTargets(ctx context.Context, endpoint string) ([]Target, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint+"/json/list", nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("reach DevTools endpoint: %w", err)
+	}
+	defer resp.Body.Close()
+	var targets []Target
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxTargetList)).Decode(&targets); err != nil {
+		return nil, fmt.Errorf("decode DevTools targets: %w", err)
+	}
+	return targets, nil
+}
+
 // Dial connects to a browser WebSocket URL.
 func Dial(ctx context.Context, wsURL string) (*Conn, error) {
 	ws, _, err := websocket.Dial(ctx, wsURL, nil)
@@ -77,7 +119,7 @@ func Dial(ctx context.Context, wsURL string) (*Conn, error) {
 		return nil, fmt.Errorf("dial DevTools: %w", err)
 	}
 	ws.SetReadLimit(64 << 20) // screenshots can be large
-	c := &Conn{ws: ws, pending: make(map[int64]chan response)}
+	c := &Conn{ws: ws, pending: make(map[int64]chan response), pages: make(map[string]*Page)}
 	go c.readLoop()
 	return c, nil
 }
@@ -146,8 +188,12 @@ func (c *Conn) readLoop() {
 			return
 		}
 		var resp response
-		if json.Unmarshal(data, &resp) != nil || resp.ID == 0 {
-			continue // event or malformed message
+		if json.Unmarshal(data, &resp) != nil {
+			continue
+		}
+		if resp.ID == 0 {
+			c.event(resp)
+			continue
 		}
 		c.mu.Lock()
 		ch := c.pending[resp.ID]
@@ -158,14 +204,69 @@ func (c *Conn) readLoop() {
 	}
 }
 
+func (c *Conn) event(ev response) {
+	switch ev.Method {
+	case "Page.javascriptDialogOpening", "Page.javascriptDialogClosed":
+	default:
+		return
+	}
+	c.mu.Lock()
+	p := c.pages[ev.SessionID]
+	c.mu.Unlock()
+	if p == nil {
+		return
+	}
+	if ev.Method == "Page.javascriptDialogClosed" {
+		p.setDialog(nil)
+		return
+	}
+	var d Dialog
+	if json.Unmarshal(ev.Params, &d) == nil {
+		p.setDialog(&d)
+	}
+}
+
+// Dialog is a JavaScript dialog a page has open. Until it closes, the page answers
+// nothing.
+type Dialog struct {
+	Type    string `json:"type"` // alert, confirm, prompt or beforeunload
+	Message string `json:"message"`
+}
+
 // Page is a browser tab attached through a flattened session.
 type Page struct {
 	conn      *Conn
 	TargetID  string
 	SessionID string
 
-	mu    sync.Mutex
-	world int // execution context of EvalIsolated, 0 until created
+	mu       sync.Mutex
+	dialog   *Dialog
+	dialogUp chan struct{} // closed when a dialog opens
+}
+
+func (p *Page) setDialog(d *Dialog) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.dialog = d
+	if d != nil {
+		close(p.dialogUp)
+		p.dialogUp = make(chan struct{})
+	}
+}
+
+// Dialog returns the dialog the page has open, if any, and a channel closed when
+// the next one opens.
+func (p *Page) Dialog() (*Dialog, <-chan struct{}) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.dialog, p.dialogUp
+}
+
+// Forget stops following the page. Its tab is gone.
+func (c *Conn) Forget(p *Page) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.pages, p.SessionID)
 }
 
 // NewPage opens a new tab, attaches to it, then navigates to url. Creating
@@ -199,7 +300,17 @@ func (c *Conn) Attach(ctx context.Context, targetID string) (*Page, error) {
 	if err := c.Call(ctx, "", "Target.attachToTarget", map[string]any{"targetId": targetID, "flatten": true}, &attached); err != nil {
 		return nil, err
 	}
-	return &Page{conn: c, TargetID: targetID, SessionID: attached.SessionID}, nil
+	p := &Page{conn: c, TargetID: targetID, SessionID: attached.SessionID, dialogUp: make(chan struct{})}
+	c.mu.Lock()
+	c.pages[p.SessionID] = p
+	c.mu.Unlock()
+	return p, nil
+}
+
+// FollowDialogs asks for the events about dialogs. A page already stuck does not
+// answer: the caller bounds it with ctx.
+func (p *Page) FollowDialogs(ctx context.Context) error {
+	return p.Call(ctx, "Page.enable", nil, nil)
 }
 
 // Navigate loads url in the page. It returns once the navigation has been
@@ -237,51 +348,118 @@ func (p *Page) Eval(ctx context.Context, expr string, out any) error {
 // shares the DOM with the page but not its JavaScript: what the page overrides,
 // such as document.visibilityState, does not apply, and what the expression
 // keeps in globalThis stays out of the page's reach until the next navigation.
+//
+// The world's number is asked for each time. Numbers are reused across renderer
+// processes: one kept across a navigation can name a context of the new page,
+// even the page's own. Chromium gives back the same world for the same name, so
+// what the expressions keep there stays. If the page navigated in between, the
+// number was already out of date: the result is dropped and the expression
+// runs again.
 func (p *Page) EvalIsolated(ctx context.Context, expr string, out any) error {
 	for attempt := 0; ; attempt++ {
-		world, err := p.isolatedWorld(ctx)
+		world, loader, err := p.isolatedWorld(ctx)
 		if err != nil {
 			return err
 		}
 		err = p.evalIn(ctx, world, expr, out)
-		if err == nil || attempt == 1 || !strings.Contains(err.Error(), "Cannot find context") {
+		if err == nil {
+			_, now, frameErr := p.mainFrame(ctx)
+			if frameErr != nil {
+				return frameErr
+			}
+			if now == loader {
+				return nil
+			}
+			err = errors.New("the page changed while it was read")
+		} else if !strings.Contains(err.Error(), "Cannot find context") {
 			return err
 		}
-		// A navigation ended the world.
-		p.mu.Lock()
-		p.world = 0
-		p.mu.Unlock()
+		if attempt == 2 {
+			return err
+		}
 	}
 }
 
-func (p *Page) isolatedWorld(ctx context.Context) (int, error) {
-	p.mu.Lock()
-	world := p.world
-	p.mu.Unlock()
-	if world != 0 {
-		return world, nil
-	}
+// mainFrame returns the ID of the page's main frame and the ID of the load of its
+// document, which changes with each navigation.
+func (p *Page) mainFrame(ctx context.Context) (frame, loader string, err error) {
 	var tree struct {
 		FrameTree struct {
 			Frame struct {
-				ID string `json:"id"`
+				ID       string `json:"id"`
+				LoaderID string `json:"loaderId"`
 			} `json:"frame"`
 		} `json:"frameTree"`
 	}
 	if err := p.Call(ctx, "Page.getFrameTree", nil, &tree); err != nil {
-		return 0, err
+		return "", "", err
+	}
+	return tree.FrameTree.Frame.ID, tree.FrameTree.Frame.LoaderID, nil
+}
+
+func (p *Page) isolatedWorld(ctx context.Context) (world int, loader string, err error) {
+	frame, loader, err := p.mainFrame(ctx)
+	if err != nil {
+		return 0, "", err
 	}
 	var created struct {
 		ID int `json:"executionContextId"`
 	}
-	params := map[string]any{"frameId": tree.FrameTree.Frame.ID, "worldName": "kivora"}
+	params := map[string]any{"frameId": frame, "worldName": "kivora"}
 	if err := p.Call(ctx, "Page.createIsolatedWorld", params, &created); err != nil {
-		return 0, err
+		return 0, "", err
 	}
-	p.mu.Lock()
-	p.world = created.ID
-	p.mu.Unlock()
-	return created.ID, nil
+	return created.ID, loader, nil
+}
+
+// Stream reads what a call left in a stream of the browser, such as a printed PDF,
+// piece by piece: the protocol carries each one in a single message.
+func (p *Page) Stream(ctx context.Context, handle string) io.ReadCloser {
+	return &stream{ctx: ctx, page: p, handle: handle}
+}
+
+type stream struct {
+	ctx    context.Context
+	page   *Page
+	handle string
+	rest   []byte
+	eof    bool
+}
+
+// streamChunk is well under the limit of a WebSocket message once in base64.
+const streamChunk = 1 << 20
+
+func (s *stream) Read(b []byte) (int, error) {
+	for len(s.rest) == 0 {
+		if s.eof {
+			return 0, io.EOF
+		}
+		var res struct {
+			Data          string `json:"data"`
+			Base64Encoded bool   `json:"base64Encoded"`
+			EOF           bool   `json:"eof"`
+		}
+		params := map[string]any{"handle": s.handle, "size": streamChunk}
+		if err := s.page.Call(s.ctx, "IO.read", params, &res); err != nil {
+			return 0, err
+		}
+		s.eof = res.EOF
+		s.rest = []byte(res.Data)
+		if res.Base64Encoded {
+			decoded, err := base64.StdEncoding.DecodeString(res.Data)
+			if err != nil {
+				return 0, err
+			}
+			s.rest = decoded
+		}
+	}
+	n := copy(b, s.rest)
+	s.rest = s.rest[n:]
+	return n, nil
+}
+
+func (s *stream) Close() error {
+	return s.page.Call(s.ctx, "IO.close", map[string]any{"handle": s.handle}, nil)
 }
 
 // evalIn evaluates in an execution context, or the page's own if it is 0.
