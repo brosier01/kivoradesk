@@ -2,13 +2,18 @@
 // kivora-audit account, so that the desktop account can add entries but not
 // change or delete the ones already there:
 //
-//	kivora-audit record    one JSON line per entry on stdin, "ok" on stdout for each
+//	kivora-audit record    one JSON object per line on stdin, "ok" on stdout for each
 //
-// Entries arrive redacted. Files are kept 90 days in /var/lib/kivora-audit.
+// Entries arrive redacted. Files are kept 90 days in /var/lib/kivora-audit. The
+// account that sends them decides what they say, not when they were recorded,
+// nor the bytes a human later reads in a terminal.
 package main
 
 import (
 	"bufio"
+	"bytes"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -41,7 +46,11 @@ func record(log *audit.Log, in io.Reader, out io.Writer) error {
 	r := bufio.NewScanner(in)
 	r.Buffer(make([]byte, 64<<10), maxLine)
 	for r.Scan() {
-		if err := log.Append(append(r.Bytes(), '\n')); err != nil {
+		line, err := entry(r.Bytes(), time.Now().UTC())
+		if err != nil {
+			return err
+		}
+		if err := log.Append(line); err != nil {
 			return err
 		}
 		if _, err := io.WriteString(out, "ok\n"); err != nil {
@@ -49,4 +58,24 @@ func record(log *audit.Log, in io.Reader, out io.Writer) error {
 		}
 	}
 	return r.Err()
+}
+
+// entry checks one line and returns what to store: the same object on one line,
+// with the time this account received it first. In valid JSON, control characters
+// are escaped, so a line cannot hold terminal sequences.
+func entry(line []byte, now time.Time) ([]byte, error) {
+	var compact bytes.Buffer
+	if err := json.Compact(&compact, line); err != nil {
+		return nil, fmt.Errorf("not JSON: %w", err)
+	}
+	object := compact.Bytes()
+	if len(object) == 0 || object[0] != '{' {
+		return nil, errors.New("not a JSON object")
+	}
+	out := fmt.Appendf(nil, `{"recorded":%q`, now.Format(time.RFC3339Nano))
+	if len(object) > 2 {
+		out = append(out, ',')
+	}
+	out = append(out, object[1:]...)
+	return append(out, '\n'), nil
 }

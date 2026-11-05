@@ -63,3 +63,17 @@ func TestClientWaitsForConfirmation(t *testing.T) {
 		t.Fatalf("helper got %q, %v", b, err)
 	}
 }
+
+// A helper of another account cannot be killed from here, and may be stuck.
+func TestClientDoesNotWaitForAStuckHelper(t *testing.T) {
+	c := &Client{Prefix: []string{"sh", "-c", `read line; echo ok; sleep 20`}}
+	if err := c.Append([]byte("x\n")); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	// The helper no longer reads its input, like one stuck on a full disk.
+	c.Close()
+	if d := time.Since(start); d > stopGrace+2*time.Second {
+		t.Fatalf("Close took %v", d)
+	}
+}

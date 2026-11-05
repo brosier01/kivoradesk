@@ -19,8 +19,13 @@ import (
 	"time"
 )
 
-// ackTimeout is how long the helper may take to confirm an entry.
-const ackTimeout = 5 * time.Second
+const (
+	// ackTimeout is how long the helper may take to confirm an entry.
+	ackTimeout = 5 * time.Second
+	// stopGrace is how long the helper may take to stop once its input closes: it
+	// runs under another account, which this one cannot signal.
+	stopGrace = 5 * time.Second
+)
 
 // Log appends lines to one file per day (audit-YYYY-MM-DD.jsonl) and deletes
 // the files older than the retention.
@@ -133,6 +138,7 @@ func (c *Client) send(line []byte) error {
 
 func (c *Client) start() error {
 	cmd := exec.Command(c.Prefix[0], c.Prefix[1:]...)
+	cmd.WaitDelay = stopGrace
 	in, err := cmd.StdinPipe()
 	if err != nil {
 		return err
@@ -154,8 +160,21 @@ func (c *Client) stop() {
 	}
 	c.in.Close()
 	c.cmd.Process.Kill()
-	c.cmd.Wait()
+	waitBriefly(c.cmd)
 	c.cmd, c.in, c.out = nil, nil, nil
+}
+
+// waitBriefly leaves a helper behind rather than hold every call of the agent.
+func waitBriefly(cmd *exec.Cmd) {
+	done := make(chan struct{})
+	go func() {
+		cmd.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(stopGrace):
+	}
 }
 
 // Close stops the helper.
@@ -164,7 +183,7 @@ func (c *Client) Close() error {
 	defer c.mu.Unlock()
 	if c.cmd != nil {
 		c.in.Close()
-		c.cmd.Wait()
+		waitBriefly(c.cmd)
 		c.cmd, c.in, c.out = nil, nil, nil
 	}
 	return nil
