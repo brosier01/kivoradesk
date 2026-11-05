@@ -1,0 +1,74 @@
+x-build: &build
+  context: .
+  args:
+    VERSION: ${KIVORA_VERSION:-dev}
+
+services:
+  kivoradesk:
+    build: *build
+    restart: unless-stopped
+    depends_on:
+      host-addresses:
+        condition: service_completed_successfully
+    environment:
+      VM_VCPUS: ${VM_VCPUS:-2}
+      VM_MEMORY_MB: ${VM_MEMORY_MB:-4096}
+      VM_DISK_GB: ${VM_DISK_GB:-16}
+      VM_DATA_GB: ${VM_DATA_GB:-16}
+      KIVORA_BACKUP_KEEP: ${KIVORA_BACKUP_KEEP:-7}
+      KIVORA_BIND: ${KIVORA_BIND:-127.0.0.1}
+      KIVORA_SSH_PORT: ${KIVORA_SSH_PORT:-2222}
+    devices:
+      - /dev/kvm
+    # Only this machine, by default. The VM's SSH server is what is published, with
+    # keys only: whoever has an authorized key gets the VM's agent account.
+    ports:
+      - "${KIVORA_BIND:-127.0.0.1}:${KIVORA_SSH_PORT:-2222}:2222"
+    volumes:
+      - data:/var/lib/kivoradesk
+      - host-addresses:/var/lib/kivoradesk-host:ro
+    # QEMU and the network need no privilege. The two capabilities only let the
+    # entrypoint start each part under its own account.
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    cap_add:
+      - SETUID
+      - SETGID
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 1m
+    # What the VM can cause must not fill the server's disk.
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "kivora", "health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 5m
+      start_interval: 3s
+
+  # Runs once at each "up", to tell the VM's network which addresses are this
+  # server's: from its own container, it cannot see a public one. It has the
+  # server's network to read them, and nothing else: no right, no VM data.
+  host-addresses:
+    build: *build
+    entrypoint: ["kivora-net", "-write-host-addresses", "/var/lib/kivoradesk-host/addresses"]
+    user: "1000"
+    network_mode: host
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - host-addresses:/var/lib/kivoradesk-host
+
+volumes:
+  data:
+  host-addresses:

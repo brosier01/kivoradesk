@@ -267,6 +267,10 @@ func (b *Browser) Navigate(ctx context.Context, rawURL string) (Tab, error) {
 		defer cancel()
 		if err := p.Navigate(nctx, u); err != nil {
 			if errors.Is(nctx.Err(), context.DeadlineExceeded) {
+				// Left pending, it keeps the tab from answering, even once the network is back.
+				sctx, cancel := context.WithTimeout(ctx, tabProbeTimeout)
+				defer cancel()
+				p.Call(sctx, "Page.stopLoading", nil, nil)
 				return fmt.Errorf("navigation to %s timed out after %v (network down or site unreachable?)", u, NavigationTimeout)
 			}
 			return err
