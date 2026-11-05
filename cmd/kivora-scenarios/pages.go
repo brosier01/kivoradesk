@@ -99,9 +99,6 @@ func (p *pageServer) url(site int, path string) string {
 	return fmt.Sprintf("http://%s:%d%s", p.hosts[site], p.port, path)
 }
 
-// origin gives the origin of one of the two sites.
-func (p *pageServer) origin(site int) string { return p.url(site, "") }
-
 // waitReport waits until a page has reported something containing text, and
 // returns it.
 func (p *pageServer) waitReport(text string, d time.Duration) (string, bool) {
