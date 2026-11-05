@@ -12,7 +12,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -53,11 +52,17 @@ func (d *Desktop) Screenshot(ctx context.Context) ([]byte, error) {
 	if err := os.MkdirAll(d.ShotDir, 0o700); err != nil {
 		return nil, err
 	}
-	path := filepath.Join(d.ShotDir, "screenshot.png")
-	if _, err := d.run(ctx, "scrot", "--overwrite", "--pointer", path); err != nil {
+	// A file per call: observing tools run side by side, here and in other sessions.
+	f, err := os.CreateTemp(d.ShotDir, "screenshot-*.png")
+	if err != nil {
 		return nil, err
 	}
-	return os.ReadFile(path)
+	f.Close()
+	defer os.Remove(f.Name())
+	if _, err := d.run(ctx, "scrot", "--overwrite", "--pointer", f.Name()); err != nil {
+		return nil, err
+	}
+	return os.ReadFile(f.Name())
 }
 
 // Move moves the pointer.

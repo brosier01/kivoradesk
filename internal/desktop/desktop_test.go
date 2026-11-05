@@ -2,10 +2,42 @@ package desktop
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"reflect"
+	"sync"
 	"testing"
 	"time"
 )
+
+// Screenshots taken at once must not share a file: this scrot writes in two steps.
+func TestParallelScreenshotsKeepTheirFile(t *testing.T) {
+	bin := t.TempDir()
+	fake := "#!/bin/sh\nfor p; do :; done\n: >\"$p\"\nsleep 0.02\nprintf BEGIN >>\"$p\"\nsleep 0.02\nprintf -- -END >>\"$p\"\n"
+	if err := os.WriteFile(filepath.Join(bin, "scrot"), []byte(fake), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
+	dir := t.TempDir()
+	d := &Desktop{Display: ":99", Width: 1280, Height: 800, ShotDir: dir}
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range 5 {
+				png, err := d.Screenshot(context.Background())
+				if err != nil || string(png) != "BEGIN-END" {
+					t.Errorf("screenshot = %q, %v", png, err)
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	if left, _ := os.ReadDir(dir); len(left) != 0 {
+		t.Fatalf("%d files left behind", len(left))
+	}
+}
 
 func TestSplitText(t *testing.T) {
 	got := SplitText("abcdef é€ ok\nab\tcdefgh\n\n", 4)
