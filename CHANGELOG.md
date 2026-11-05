@@ -5,6 +5,12 @@ All notable changes to KivoraDesk are documented here. The format follows
 [Semantic Versioning](https://semver.org/). Before 1.0, minor versions may
 break compatibility.
 
+## 0.4.2 - 2026-11-06
+
+### Changed
+
+- **README:** an animation shows how KivoraDesk works.
+
 ## 0.4.1 - 2026-11-05
 
 ### Changed

@@ -12,15 +12,9 @@ KivoraDesk runs an Alpine Linux VM on your server, in a Docker container. Claude
 Code stays on your laptop and drives the VM through an MCP server reached over SSH.
 You watch the desktop live and can take over at any time.
 
-```text
-Laptop                              Server (Linux x86_64, KVM)
-┌──────────────────────┐            ┌──────────────────────────────────────┐
-│ Claude Code          │── SSH ────▶│ VM (Alpine Linux)                    │
-│  └ MCP client        │            │  ├ MCP server                        │
-│ Browser: live view   │── tunnel ─▶│  ├ desktop + Chromium                │
-└──────────────────────┘            │  └ /workspace (durable files)        │
-                                    └──────────────────────────────────────┘
-```
+<p align="center">
+  <img src="docs/assets/kivoradesk.gif" width="720" alt="Animation: Claude Code on the laptop drives the VM over SSH, the VM reaches the Internet but not the local network, the human takes over in the live view, and a password is filled without the agent seeing it">
+</p>
 
 - **Isolated.** The VM reaches the Internet, not your network. Shell commands run
   under a separate account with no network except the sites you allow.
