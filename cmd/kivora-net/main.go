@@ -10,18 +10,37 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
 	"net"
+	"net/netip"
 	"os"
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
+	"time"
 
 	"github.com/brosier01/kivoradesk/internal/relay"
 	"github.com/brosier01/kivoradesk/internal/usernet"
+	"golang.org/x/sys/unix"
+)
+
+// version is set when the image is built.
+var version = "dev"
+
+const (
+	// Connections to a published port, in all and from one address. Each costs a
+	// descriptor and a connection of the VM's SSH server, whoever opened it.
+	maxClients          = 128
+	maxClientsPerSource = 16
+	guestDialTimeout    = 20 * time.Second
+	// How long a client may keep its side open once the VM has finished.
+	clientGrace = 5 * time.Second
+	maxBackoff  = time.Second
 )
 
 func main() {
@@ -41,10 +60,21 @@ func run(ctx context.Context) error {
 	writeHost := flag.String("write-host-addresses", "", "write the addresses of this machine to this file, and exit")
 	console := flag.String("console", "", "SOCKET=FILE: keep the VM's serial console, sent by QEMU to this socket")
 	debug := flag.Bool("debug", false, "log blocked connections")
+	showVersion := flag.Bool("version", false, "print the version, and exit")
 	flag.Parse()
 
+	if *showVersion {
+		fmt.Println(version)
+		return nil
+	}
 	if *writeHost != "" {
-		return writeHostAddresses(*writeHost)
+		return writeHostAddresses(*writeHost, os.Getenv("KIVORA_PUBLIC_ADDRESSES"))
+	}
+
+	// This process holds the VM's disks through its view of the volume, in
+	// /proc/PID/root: no other process under this UID may look there.
+	if err := unix.Prctl(unix.PR_SET_DUMPABLE, 0, 0, 0, 0); err != nil {
+		return fmt.Errorf("PR_SET_DUMPABLE: %w", err)
 	}
 
 	level := slog.LevelInfo
@@ -82,7 +112,9 @@ func run(ctx context.Context) error {
 		return err
 	}
 	defer n.Close()
-	n.SetPolicy(newPolicy(log, *allowFile, *hostFile).allow)
+	p := newPolicy(log, *allowFile, *hostFile)
+	n.SetPolicy(p.allow)
+	n.SetResolvable(p.resolvable)
 
 	if *forward != "" {
 		for _, spec := range strings.Split(*forward, ",") {
@@ -96,7 +128,7 @@ func run(ctx context.Context) error {
 				return err
 			}
 			defer f.Close()
-			go guestPort(ctx, log, n, f, uint16(port))
+			go guestPort(ctx, log, n.DialGuest, f, uint16(port))
 		}
 	}
 
@@ -114,22 +146,98 @@ func run(ctx context.Context) error {
 	}
 }
 
-// guestPort forwards the connections of l to a port of the VM.
-func guestPort(ctx context.Context, log *slog.Logger, n *usernet.Network, l net.Listener, port uint16) {
+// clientSlots limits the connections to a published port. Those of this container,
+// the admin commands, do not count: nothing outside can keep them out.
+type clientSlots struct {
+	mu       sync.Mutex
+	total    int
+	bySource map[netip.Addr]int
+}
+
+func (s *clientSlots) take(source netip.Addr) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.total >= maxClients || s.bySource[source] >= maxClientsPerSource {
+		return false
+	}
+	if s.bySource == nil {
+		s.bySource = map[netip.Addr]int{}
+	}
+	s.total++
+	s.bySource[source]++
+	return true
+}
+
+func (s *clientSlots) release(source netip.Addr) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.total--
+	if s.bySource[source]--; s.bySource[source] == 0 {
+		delete(s.bySource, source)
+	}
+}
+
+func sourceOf(conn net.Conn) netip.Addr {
+	if a, ok := conn.RemoteAddr().(*net.TCPAddr); ok {
+		if ap := a.AddrPort(); ap.IsValid() {
+			return ap.Addr().Unmap()
+		}
+	}
+	return netip.Addr{}
+}
+
+// guestPort forwards the connections of l to a port of the VM. Its SSH server sees
+// them all coming from one address, the gateway's: this is the only place that
+// knows who connects, and what keeps one client from holding the port.
+func guestPort(ctx context.Context, log *slog.Logger, dial func(context.Context, uint16) (net.Conn, error), l net.Listener, port uint16) {
+	var slots clientSlots
+	var refused time.Time
+	backoff := 10 * time.Millisecond
 	for {
 		conn, err := l.Accept()
 		if err != nil {
-			return
+			// Out of descriptors, for one: nothing else would ever accept again.
+			if errors.Is(err, net.ErrClosed) || ctx.Err() != nil {
+				return
+			}
+			log.Warn("published port: accept failed", "port", port, "err", err)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(backoff):
+			}
+			backoff = min(2*backoff, maxBackoff)
+			continue
+		}
+		backoff = 10 * time.Millisecond
+
+		source := sourceOf(conn)
+		local := source.IsLoopback()
+		if !local && !slots.take(source) {
+			if now := time.Now(); now.Sub(refused) >= time.Minute {
+				refused = now
+				log.Warn("published port: too many connections", "port", port, "from", source)
+			}
+			conn.Close()
+			continue
+		}
+		if !local {
+			log.Info("published port: connection", "port", port, "from", conn.RemoteAddr())
 		}
 		go func() {
+			if !local {
+				defer slots.release(source)
+			}
 			defer conn.Close()
-			guest, err := n.DialGuest(ctx, port)
+			dialCtx, cancel := context.WithTimeout(ctx, guestDialTimeout)
+			guest, err := dial(dialCtx, port)
+			cancel()
 			if err != nil {
 				log.Debug("VM unreachable", "port", port, "err", err)
 				return
 			}
 			defer guest.Close()
-			relay.Join(conn, guest)
+			relay.JoinServer(conn, guest, clientGrace)
 		}()
 	}
 }

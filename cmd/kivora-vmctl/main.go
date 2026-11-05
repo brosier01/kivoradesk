@@ -4,6 +4,9 @@
 //	kivora-vmctl -qmp QMP.sock status
 //	kivora-vmctl -qga QGA.sock agent
 //	kivora-vmctl -qmp QMP.sock quit
+//	kivora-vmctl -qmp QMP.sock cont
+//	kivora-vmctl -qmp QMP.sock size DEVICE
+//	kivora-vmctl -qmp QMP.sock -qga QGA.sock shutdown
 //	kivora-vmctl -qmp QMP.sock -qga QGA.sock backup DEVICE MOUNTPOINT TARGET
 package main
 
@@ -21,11 +24,18 @@ import (
 	"time"
 )
 
+// version is set when the image is built.
+var version = "dev"
+
 const (
 	backupJob  = "kivora-backup"
 	backupNode = "kivora-backup"
 
+	usage = "usage: kivora-vmctl status | agent | quit | cont | size DEVICE | shutdown | backup DEVICE MOUNTPOINT TARGET"
+
 	qmpTimeout = 30 * time.Second
+	// QEMU serves one client at a time: stopping must not wait for it.
+	shutdownQMPTimeout = 5 * time.Second
 	// The guest agent is in the VM: what it sends is not trusted, and this is far
 	// more than its answers need.
 	maxAgentOutput = 1 << 20
@@ -43,7 +53,12 @@ func main() {
 	defer stop()
 	qmpPath := flag.String("qmp", "", "QEMU's control socket")
 	qgaPath := flag.String("qga", "", "the guest agent's socket")
+	showVersion := flag.Bool("version", false, "print the version, and exit")
 	flag.Parse()
+	if *showVersion {
+		fmt.Println(version)
+		return
+	}
 	if err := run(ctx, *qmpPath, *qgaPath, flag.Args()); err != nil {
 		fmt.Fprintln(os.Stderr, "kivora-vmctl:", err)
 		os.Exit(1)
@@ -52,7 +67,7 @@ func main() {
 
 func run(ctx context.Context, qmpPath, qgaPath string, args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: kivora-vmctl status | agent | quit | backup DEVICE MOUNTPOINT TARGET")
+		return errors.New(usage)
 	}
 	switch {
 	case args[0] == "agent" && len(args) == 1:
@@ -68,17 +83,11 @@ func run(ctx context.Context, qmpPath, qgaPath string, args []string) error {
 			return err
 		}
 		defer q.close()
-		var status struct {
-			Status string `json:"status"`
-		}
-		answer, err := q.call("query-status", nil)
+		status, err := q.status()
 		if err != nil {
 			return err
 		}
-		if err := json.Unmarshal(answer, &status); err != nil {
-			return err
-		}
-		fmt.Println(status.Status)
+		fmt.Println(status)
 		return nil
 	case args[0] == "quit" && len(args) == 1:
 		q, err := dialQMP(qmpPath)
@@ -88,6 +97,28 @@ func run(ctx context.Context, qmpPath, qgaPath string, args []string) error {
 		defer q.close()
 		_, err = q.call("quit", nil)
 		return err
+	case args[0] == "cont" && len(args) == 1:
+		q, err := dialQMP(qmpPath)
+		if err != nil {
+			return err
+		}
+		defer q.close()
+		_, err = q.call("cont", nil)
+		return err
+	case args[0] == "size" && len(args) == 2:
+		q, err := dialQMP(qmpPath)
+		if err != nil {
+			return err
+		}
+		defer q.close()
+		virtual, actual, err := q.diskSize(args[1])
+		if err != nil {
+			return err
+		}
+		fmt.Println(virtual, actual)
+		return nil
+	case args[0] == "shutdown" && len(args) == 1:
+		return shutdown(qmpPath, qgaPath)
 	case args[0] == "backup" && len(args) == 4:
 		q, err := dialQMP(qmpPath)
 		if err != nil {
@@ -104,7 +135,36 @@ func run(ctx context.Context, qmpPath, qgaPath string, args []string) error {
 		}
 		return backup(ctx, q, a, args[1], args[2], args[3])
 	}
-	return errors.New("usage: kivora-vmctl status | agent | quit | backup DEVICE MOUNTPOINT TARGET")
+	return errors.New(usage)
+}
+
+// shutdown asks the guest to power off by every way that does not need its
+// network: the guest agent, then the power button. A VM that stopped on a full
+// volume must first run again to hear it. It succeeds if one of them was sent.
+func shutdown(qmpPath, qgaPath string) error {
+	q, qmpErr := dialQMPWithin(qmpPath, shutdownQMPTimeout)
+	if qmpErr == nil {
+		defer q.close()
+		if status, err := q.status(); err == nil && status != "running" {
+			if _, err := q.call("cont", nil); err != nil {
+				fmt.Fprintln(os.Stderr, "warning: the VM does not resume:", err)
+			}
+		}
+	}
+	a, agentErr := dialAgent(qgaPath)
+	if agentErr == nil {
+		defer a.close()
+		// Commands other than this one are refused on a frozen disk.
+		a.call("guest-fsfreeze-thaw", nil, agentTimeout)
+		agentErr = a.notify("guest-shutdown", map[string]any{"mode": "powerdown"})
+	}
+	if qmpErr == nil {
+		_, qmpErr = q.call("system_powerdown", nil)
+	}
+	if qmpErr != nil && agentErr != nil {
+		return fmt.Errorf("the guest agent: %v; QEMU: %v", agentErr, qmpErr)
+	}
+	return nil
 }
 
 // backup copies a disk of the running VM into TARGET, an existing qcow2 file, as
@@ -177,13 +237,15 @@ type qmpMessage struct {
 	QMP json.RawMessage `json:"QMP"`
 }
 
-func dialQMP(path string) (*qmpClient, error) {
-	conn, err := net.DialTimeout("unix", path, qmpTimeout)
+func dialQMP(path string) (*qmpClient, error) { return dialQMPWithin(path, qmpTimeout) }
+
+func dialQMPWithin(path string, timeout time.Duration) (*qmpClient, error) {
+	conn, err := net.DialTimeout("unix", path, timeout)
 	if err != nil {
 		return nil, err
 	}
 	q := &qmpClient{conn: conn, dec: json.NewDecoder(conn)}
-	conn.SetDeadline(time.Now().Add(qmpTimeout))
+	conn.SetDeadline(time.Now().Add(timeout))
 	var greeting qmpMessage
 	if err := q.dec.Decode(&greeting); err != nil {
 		conn.Close()
@@ -197,6 +259,46 @@ func dialQMP(path string) (*qmpClient, error) {
 }
 
 func (q *qmpClient) close() { q.conn.Close() }
+
+func (q *qmpClient) status() (string, error) {
+	answer, err := q.call("query-status", nil)
+	if err != nil {
+		return "", err
+	}
+	var status struct {
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal(answer, &status); err != nil {
+		return "", err
+	}
+	return status.Status, nil
+}
+
+// diskSize returns the size a disk has for the guest, and on the volume.
+func (q *qmpClient) diskSize(device string) (virtual, actual int64, err error) {
+	answer, err := q.call("query-block", nil)
+	if err != nil {
+		return 0, 0, err
+	}
+	var disks []struct {
+		Device   string `json:"device"`
+		Inserted struct {
+			Image struct {
+				Virtual int64 `json:"virtual-size"`
+				Actual  int64 `json:"actual-size"`
+			} `json:"image"`
+		} `json:"inserted"`
+	}
+	if err := json.Unmarshal(answer, &disks); err != nil {
+		return 0, 0, err
+	}
+	for _, d := range disks {
+		if d.Device == device && d.Inserted.Image.Virtual > 0 {
+			return d.Inserted.Image.Virtual, d.Inserted.Image.Actual, nil
+		}
+	}
+	return 0, 0, fmt.Errorf("no disk %s", device)
+}
 
 // resetDecoder lets the next read work after a timeout, which a Decoder keeps
 // returning otherwise.
@@ -355,6 +457,14 @@ func (a *guestAgent) sync() error {
 			return nil
 		}
 	}
+}
+
+// notify sends a command that gets no answer when it works.
+func (a *guestAgent) notify(command string, args any) error {
+	if err := a.sync(); err != nil {
+		return err
+	}
+	return json.NewEncoder(a.conn).Encode(map[string]any{"execute": command, "arguments": args})
 }
 
 func (a *guestAgent) call(command string, args any, timeout time.Duration) error {

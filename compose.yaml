@@ -31,7 +31,8 @@ services:
     # entrypoint start each part under its own account.
     read_only: true
     tmpfs:
-      - /tmp
+      - /tmp:size=64m
+    pids_limit: 1024
     cap_drop:
       - ALL
     cap_add:
@@ -50,7 +51,9 @@ services:
       test: ["CMD", "kivora", "health"]
       interval: 30s
       timeout: 10s
-      start_period: 5m
+      # A first installation on a slow server, or a slow mirror: the admin commands
+      # answer in the meantime, and kivora doctor says if it failed.
+      start_period: 30m
       start_interval: 3s
 
   # Runs once at each "up", to tell the VM's network which addresses are this
@@ -59,8 +62,11 @@ services:
   host-addresses:
     build: *build
     entrypoint: ["kivora-net", "-write-host-addresses", "/var/lib/kivoradesk-host/addresses"]
-    user: "1000"
+    user: "64101:64101"
     network_mode: host
+    environment:
+      # What a router or a cloud maps to this server is on none of its interfaces.
+      KIVORA_PUBLIC_ADDRESSES: ${KIVORA_PUBLIC_ADDRESSES:-}
     read_only: true
     cap_drop:
       - ALL

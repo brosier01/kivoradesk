@@ -18,6 +18,7 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
+	"gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
 )
 
 func TestAllowedKeepsTheVMOffPrivateNetworks(t *testing.T) {
@@ -33,6 +34,24 @@ func TestAllowedKeepsTheVMOffPrivateNetworks(t *testing.T) {
 		}
 	}
 	for _, s := range []string{"1.1.1.1", "8.8.8.8", "93.184.216.34", "172.32.0.1", "11.0.0.1"} {
+		if !Allowed(netip.MustParseAddr(s)) {
+			t.Errorf("%s is blocked", s)
+		}
+	}
+}
+
+func TestAllowedRefusesWhatCloudsKeepOnPublicAddresses(t *testing.T) {
+	for _, s := range []string{
+		"168.63.129.16", // Azure platform services
+		"192.88.99.1",   // 6to4 relays
+		"161.26.0.1",    // IBM Cloud service network
+		"169.254.169.254", "100.100.100.200", "192.0.0.192", "169.254.0.23",
+	} {
+		if Allowed(netip.MustParseAddr(s)) {
+			t.Errorf("%s is allowed", s)
+		}
+	}
+	for _, s := range []string{"168.63.129.15", "168.63.129.17", "161.27.0.1", "192.88.98.1"} {
 		if !Allowed(netip.MustParseAddr(s)) {
 			t.Errorf("%s is blocked", s)
 		}
@@ -271,6 +290,44 @@ func TestDNS(t *testing.T) {
 	}
 }
 
+func TestDNSKeepsTheNetworksAroundTheVMOutOfItsAnswers(t *testing.T) {
+	n, g := newGuest(t)
+	looked := 0
+	n.lookup = func(_ context.Context, name string) ([]net.IP, error) {
+		looked++
+		switch name {
+		case "kivoradesk.", "nas.lan.example.":
+			return []net.IP{net.IPv4(172, 21, 0, 2)}, nil
+		case "mixed.example.":
+			return []net.IP{net.IPv4(192, 168, 1, 7), net.IPv4(93, 184, 216, 34)}, nil
+		case "staging.example.":
+			return []net.IP{net.IPv4(192, 168, 1, 20)}, nil
+		}
+		return nil, &net.DNSError{Err: "no such host", Name: name, IsNotFound: true}
+	}
+	n.SetResolvable(func(ip netip.Addr) bool {
+		return Allowed(ip) || ip == netip.MustParseAddr("192.168.1.20")
+	})
+
+	if m := query(t, g, "kivoradesk.", dnsmessage.TypeA); m.RCode != dnsmessage.RCodeNameError || len(m.Answers) != 0 {
+		t.Errorf("a name of one label: %+v", m)
+	}
+	if looked != 0 {
+		t.Error("a name of one label reached the resolver of this computer")
+	}
+	if m := query(t, g, "nas.lan.example.", dnsmessage.TypeA); m.RCode != dnsmessage.RCodeNameError || len(m.Answers) != 0 {
+		t.Errorf("a name for a private address: %+v", m)
+	}
+	m := query(t, g, "mixed.example.", dnsmessage.TypeA)
+	if m.RCode != dnsmessage.RCodeSuccess || len(m.Answers) != 1 || m.Answers[0].Body.(*dnsmessage.AResource).A != [4]byte{93, 184, 216, 34} {
+		t.Errorf("a name with both kinds of addresses: %+v", m)
+	}
+	m = query(t, g, "staging.example.", dnsmessage.TypeA)
+	if m.RCode != dnsmessage.RCodeSuccess || len(m.Answers) != 1 || m.Answers[0].Body.(*dnsmessage.AResource).A != [4]byte{192, 168, 1, 20} {
+		t.Errorf("a name for an allowed private service: %+v", m)
+	}
+}
+
 func TestDNSManyAddressesFitInOneAnswer(t *testing.T) {
 	n, _ := newGuest(t)
 	n.lookup = func(context.Context, string) ([]net.IP, error) {
@@ -312,26 +369,146 @@ func TestOtherDatagramsAreDropped(t *testing.T) {
 	}
 }
 
-func TestServeStopsOnAnInvalidFrame(t *testing.T) {
+// arpRequest asks who has the gateway's address: the stack answers it.
+func arpRequest() []byte {
+	mac := []byte{0x52, 0x54, 0x00, 0x6b, 0x64, 0x77}
+	frame := append(bytes.Repeat([]byte{0xff}, 6), mac...)
+	frame = append(frame, 0x08, 0x06, 0, 1, 0x08, 0, 6, 4, 0, 1)
+	frame = append(frame, mac...)
+	guest, gateway := GuestIP.As4(), GatewayIP.As4()
+	frame = append(frame, guest[:]...)
+	frame = append(frame, make([]byte, 6)...)
+	return append(frame, gateway[:]...)
+}
+
+func TestServeSkipsFramesThatCannotBeReal(t *testing.T) {
 	n, err := New(slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer n.Close()
-	for _, length := range []uint32{0, maxFrame + 1} {
-		a, b := net.Pipe()
-		done := make(chan error, 1)
-		go func() { done <- n.Serve(context.Background(), a) }()
-		go b.Write(binary.BigEndian.AppendUint32(nil, length))
-		select {
-		case err := <-done:
-			if err == nil {
-				t.Errorf("frame of %d bytes: no error", length)
-			}
-		case <-time.After(5 * time.Second):
-			t.Fatalf("frame of %d bytes: still serving", length)
+	a, b := net.Pipe()
+	defer b.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- n.Serve(ctx, a) }()
+
+	too := maxFrame + 1
+	var out []byte
+	out = binary.BigEndian.AppendUint32(out, 0)
+	out = binary.BigEndian.AppendUint32(out, uint32(too))
+	out = append(out, make([]byte, too)...)
+	request := arpRequest()
+	out = binary.BigEndian.AppendUint32(out, uint32(len(request)))
+	out = append(out, request...)
+	go b.Write(out)
+
+	// The link is still up, and the stack answers the next real frame.
+	b.SetReadDeadline(time.Now().Add(10 * time.Second))
+	var size [4]byte
+	if _, err := io.ReadFull(b, size[:]); err != nil {
+		t.Fatalf("no answer after the invalid frames: %v", err)
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("stopped serving: %v", err)
+	default:
+	}
+}
+
+// A far end that never closes, and a VM that goes away.
+func TestConnectionsEndWithTheVM(t *testing.T) {
+	n, err := New(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer n.Close()
+	n.SetPolicy(func(netip.Addr, uint16) bool { return true })
+	l, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	far := make(chan net.Conn, 1)
+	go func() {
+		c, err := l.Accept()
+		if err == nil {
+			far <- c
 		}
-		b.Close()
+	}()
+	n.dial = func(ctx context.Context, _ string) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, "tcp4", l.Addr().String())
+	}
+
+	s, link, err := newStack(GuestIP, tcpip.LinkAddress("\x52\x54\x00\x6b\x64\x77"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	defer link.Close()
+	a, b := net.Pipe()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	serving := make(chan struct{})
+	go func() { n.Serve(ctx, a); close(serving) }()
+	go pump(ctx, b, link)
+
+	c, err := (&guest{s}).dial(timeout(t), netip.MustParseAddr("93.184.216.34"), 443)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	remote := <-far
+	defer remote.Close()
+	// Data from the far end reaches the VM once the connection is set up.
+	remote.Write([]byte("x"))
+	c.SetReadDeadline(time.Now().Add(10 * time.Second))
+	if _, err := io.ReadFull(c, make([]byte, 1)); err != nil {
+		t.Fatal(err)
+	}
+	if len(n.flows) != 1 {
+		t.Fatalf("%d slots in use", len(n.flows))
+	}
+
+	b.Close() // QEMU is gone
+	<-serving
+	remote.SetReadDeadline(time.Now().Add(10 * time.Second))
+	if _, err := remote.Read(make([]byte, 1)); err == nil {
+		t.Error("the far end got data from a VM that is gone")
+	} else if ne, ok := err.(net.Error); ok && ne.Timeout() {
+		t.Error("the connection outlives the VM")
+	}
+	if n.currentGeneration() == 0 {
+		t.Error("connections opening now would not know the VM has gone")
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for len(n.flows) != 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(n.flows) != 0 {
+		t.Errorf("%d slots still in use", len(n.flows))
+	}
+}
+
+func TestBuffersAreBounded(t *testing.T) {
+	s, link, err := newStack(GuestIP, tcpip.LinkAddress("\x52\x54\x00\x6b\x64\x77"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	defer link.Close()
+	var receive tcpip.TCPReceiveBufferSizeRangeOption
+	if err := s.TransportProtocolOption(tcp.ProtocolNumber, &receive); err != nil || receive.Max != maxTCPBuffer {
+		t.Errorf("receive buffer: %+v, %v", receive, err)
+	}
+	var send tcpip.TCPSendBufferSizeRangeOption
+	if err := s.TransportProtocolOption(tcp.ProtocolNumber, &send); err != nil || send.Max != maxTCPBuffer {
+		t.Errorf("send buffer: %+v, %v", send, err)
+	}
+	if maxFlows*2*(maxTCPBuffer+32<<10) > 2200<<20 {
+		t.Errorf("the VM can make this process hold %d MiB", maxFlows*2*(maxTCPBuffer+32<<10)>>20)
 	}
 }
 

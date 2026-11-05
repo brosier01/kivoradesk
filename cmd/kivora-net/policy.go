@@ -21,6 +21,8 @@ import (
 // policy decides what the VM may connect to: the Internet, without this server's
 // own addresses, plus the private services the human allowed. Both lists are
 // files, read again when they change, so a change applies to the next connection.
+// While the addresses of this server are unknown, nothing but the allowed services
+// is reachable: a public one could be any address.
 type policy struct {
 	log *slog.Logger
 
@@ -29,6 +31,8 @@ type policy struct {
 	hostFile  watchedFile
 	rules     []rule
 	host      map[netip.Addr]bool
+	hostKnown bool
+	warned    map[string]time.Time
 }
 
 // rule is an entry of the allowlist. Port 0 stands for any port.
@@ -44,8 +48,36 @@ func newPolicy(log *slog.Logger, allowFile, hostFile string) *policy {
 func (p *policy) allow(ip netip.Addr, port uint16) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.refresh()
+	for _, r := range p.rules {
+		if r.prefix.Contains(ip) && (r.port == 0 || r.port == port) {
+			return true
+		}
+	}
+	return p.internet(ip)
+}
+
+// resolvable reports whether the VM may learn that a name leads to ip: it may
+// connect to it, on one port at least.
+func (p *policy) resolvable(ip netip.Addr) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.refresh()
+	for _, r := range p.rules {
+		if r.prefix.Contains(ip) {
+			return true
+		}
+	}
+	return p.internet(ip)
+}
+
+func (p *policy) internet(ip netip.Addr) bool {
+	return p.hostKnown && !p.host[ip] && usernet.Allowed(ip)
+}
+
+func (p *policy) refresh() {
 	if data, changed, err := p.allowFile.read(); err != nil {
-		p.log.Warn("allowlist not read", "err", err)
+		p.warn("allowlist not read", "err", err)
 	} else if changed {
 		var bad []string
 		p.rules, bad = parseAllowlist(data)
@@ -53,17 +85,32 @@ func (p *policy) allow(ip netip.Addr, port uint16) bool {
 			p.log.Warn("allowlist entry ignored", "entry", entry)
 		}
 	}
-	if data, changed, err := p.hostFile.read(); err != nil {
-		p.log.Warn("addresses of this server not read", "err", err)
-	} else if changed {
-		p.host = parseHostAddresses(data)
-	}
-	for _, r := range p.rules {
-		if r.prefix.Contains(ip) && (r.port == 0 || r.port == port) {
-			return true
+	data, changed, err := p.hostFile.read()
+	switch {
+	case err != nil:
+		p.hostKnown = false
+		p.warn("addresses of this server not read: the VM only reaches its allowed services", "err", err)
+	case p.hostFile.path != "" && !p.hostFile.seen:
+		p.hostKnown = false
+		p.warn("no addresses of this server: the VM only reaches its allowed services; run docker compose up", "file", p.hostFile.path)
+	default:
+		p.hostKnown = true
+		if changed {
+			p.host = parseHostAddresses(data)
 		}
 	}
-	return !p.host[ip] && usernet.Allowed(ip)
+}
+
+// warn logs at most once a minute per message: the VM decides how often this runs,
+// and logs take disk space.
+func (p *policy) warn(msg string, args ...any) {
+	if now := time.Now(); now.Sub(p.warned[msg]) >= time.Minute {
+		if p.warned == nil {
+			p.warned = map[string]time.Time{}
+		}
+		p.warned[msg] = now
+		p.log.Warn(msg, args...)
+	}
 }
 
 // watchedFile tells when a file has changed. A file that does not exist reads as
@@ -148,34 +195,64 @@ func parseRule(entry string) (rule, error) {
 	return r, nil
 }
 
-// parseHostAddresses reads the file of writeHostAddresses.
+// parseHostAddresses reads the file of writeHostAddresses. The router counts too:
+// a public one is the way into the server's own network.
 func parseHostAddresses(data string) map[netip.Addr]bool {
 	host := map[netip.Addr]bool{}
 	for line := range strings.Lines(data) {
-		address, kind, _ := strings.Cut(strings.TrimSpace(line), " ")
-		if ip, err := netip.ParseAddr(address); err == nil && kind == "address" {
+		address, _, _ := strings.Cut(strings.TrimSpace(line), " ")
+		if ip, err := netip.ParseAddr(address); err == nil {
 			host[ip] = true
 		}
 	}
 	return host
 }
 
-// writeHostAddresses records the IPv4 addresses of the machine this runs on,
-// and its default router. In a container with the host's network, this tells the
-// VM's network what it could not see from its own container: a public address of
-// the server is an address like any other.
-func writeHostAddresses(path string) error {
+// parsePublicAddresses reads a list of IPv4 addresses, separated by commas or
+// spaces.
+func parsePublicAddresses(list string) ([]netip.Addr, error) {
+	var public []netip.Addr
+	for _, field := range strings.FieldsFunc(list, func(r rune) bool { return r == ',' || r == ' ' }) {
+		ip, err := netip.ParseAddr(field)
+		if err != nil || !ip.Is4() {
+			return nil, fmt.Errorf("KIVORA_PUBLIC_ADDRESSES: %q is not an IPv4 address", field)
+		}
+		public = append(public, ip)
+	}
+	return public, nil
+}
+
+// writeHostAddresses records the IPv4 addresses of the machine this runs on, its
+// default router, and the public addresses it was told about. In a container with
+// the host's network, this tells the VM's network what it could not see from its
+// own container. An address on an interface is found: one that a router or a cloud
+// maps to this server is on no interface, and must be given.
+func writeHostAddresses(path, public string) error {
 	addrs, err := net.InterfaceAddrs()
 	if err != nil {
 		return err
 	}
+	given, err := parsePublicAddresses(public)
+	if err != nil {
+		return err
+	}
 	var b strings.Builder
+	written := map[string]bool{}
+	address := func(ip string) {
+		if !written[ip] {
+			written[ip] = true
+			fmt.Fprintf(&b, "%s address\n", ip)
+		}
+	}
 	for _, a := range addrs {
 		if n, ok := a.(*net.IPNet); ok {
 			if v4 := n.IP.To4(); v4 != nil && !v4.IsLoopback() {
-				fmt.Fprintf(&b, "%s address\n", v4)
+				address(v4.String())
 			}
 		}
+	}
+	for _, ip := range given {
+		address(ip.String())
 	}
 	if f, err := os.Open("/proc/net/route"); err == nil {
 		defer f.Close()
