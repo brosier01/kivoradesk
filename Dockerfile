@@ -25,7 +25,7 @@ RUN mkdir -p /out/guest \
 
 # The Alpine cloud image, checked against its signature: a checksum from the same
 # mirror would only detect a damaged download.
-FROM alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a AS base-image
+FROM alpine:3.24@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf AS base-image
 ARG ALPINE_BRANCH=v3.24
 ARG ALPINE_IMAGE=alpine-3.24.3-x86_64-cloudinit-r0.qcow2
 RUN apk add --no-cache curl gnupg
@@ -36,7 +36,7 @@ RUN url=https://dl-cdn.alpinelinux.org/alpine/$ALPINE_BRANCH/releases/cloud/$ALP
 	&& gpg --batch --quiet --dearmor -o /keyring.gpg /key.asc \
 	&& gpgv --quiet --keyring /keyring.gpg /alpine.asc /alpine.qcow2
 
-FROM alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
+FROM alpine:3.24@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf
 # Read by nothing, but changes the apk line: QEMU and the rest of the image are only
 # as recent as the day this step ran, and a build reuses it until the next release.
 COPY --from=build /out/release /opt/kivoradesk/release
