@@ -3,7 +3,7 @@
 
 # The base images are pinned: each version is built from what was tested. A new
 # version installs the packages of its day: see the ARG before apk.
-FROM golang:1.27.3-alpine@sha256:d200d2dd76b03a99b52651fd1325aff7dcd35422c35c01bac56571b0507f3deb AS build
+FROM golang:1.27.3-alpine@sha256:fa3d596898d9f126af7c01d14ee7597bab3f39cccf392ef36b69fe77cd681f18 AS build
 # KIVORA_VERSION sets the version. Otherwise it comes from the clone's tags: v0.4.1
 # on a release, v0.4.1-3-gabc1234 three commits after it, dev without git history.
 ARG VERSION
